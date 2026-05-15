@@ -18,9 +18,14 @@
 //   - Activations are INT8 (per-tensor scale separate).
 //   - Output is INT32 (caller requantizes).
 //   - One row of W per pipelined iteration. SIMD = LANES inside the row.
-//   - 2:4 structured sparsity: a companion bitmask per 4 weights (2 bytes)
-//     tells the engine to skip zero pairs. This reduces HBM traffic and
-//     compute for pruned layers.
+//   - 2:4 structured sparsity: a companion bitmask per weight pair tells the
+//     engine to skip zero pairs. This reduces HBM traffic and compute.
+//
+// Data layout per beat:
+//   - Weight beat:  LANES/2 bytes  (2 nibbles/byte  => LANES int4 weights)
+//   - Activation beat: LANES bytes  (1 int8 per weight => LANES int8 activations)
+//   - Mask beat (optional): LANES/2 bits (2 bits/byte => LANES bits)
+//     bit 2*lane+0 = valid for low nibble, bit 2*lane+1 = valid for high nibble.
 //
 // This file is the *kernel contract*, not synthesizable until placed inside a
 // Vitis HLS project. It carries the pragmas, port widths, and II target so the
@@ -50,20 +55,18 @@
 #define FLLM_TILE_ROWS 16
 #endif
 
-static constexpr int LANES        = FLLM_LANES;      // SIMD inside a row
+static constexpr int LANES        = FLLM_LANES;      // MACs per cycle (must be even)
 static constexpr int TILE_ROWS    = FLLM_TILE_ROWS; // output rows processed in parallel
+static constexpr int W_BEAT_BYTES = LANES / 2;       // 2 nibbles per byte
+static constexpr int A_BEAT_BYTES = LANES;           // 1 int8 per MAC
+static constexpr int M_BEAT_BITS  = LANES;           // 1 bit per MAC (2 per weight byte)
+
+static_assert(LANES % 2 == 0, "LANES must be even for INT4 packing");
 
 // Packed types --------------------------------------------------------------
-// One activation lane = 8 bits.  One packed beat = LANES activations.
-typedef ap_uint<LANES * 8> packed_a_beat_t;
-
-// One weight beat = LANES bytes, each holding two int4 weights (low nibble,
-// high nibble).  Total weight pairs per beat = LANES * 2.
-typedef ap_uint<LANES * 8> packed_w_beat_t;
-
-// One sparsity mask bit per weight pair.  With 2:4 structured sparsity, half
-// the pairs are zero and can be skipped.
-typedef ap_uint<LANES * 2> sparse_mask_beat_t;
+typedef ap_uint<A_BEAT_BYTES * 8> packed_a_beat_t;   // LANES INT8 activations
+typedef ap_uint<W_BEAT_BYTES * 8> packed_w_beat_t;    // LANES/2 bytes => LANES nibbles
+typedef ap_uint<M_BEAT_BITS>       sparse_mask_beat_t; // 1 bit per MAC
 
 // Scale per output row (loaded from BRAM at start of the tile).
 typedef float scale_t;
@@ -72,14 +75,13 @@ typedef float scale_t;
 // matvec_int4_tile — one INT4×INT8 matvec tile.
 //
 // Parameters (template so HLS can unroll / partition statically):
-//   IN_FEATURES   : number of input columns (must divide LANES*2 for sparsity)
+//   IN_FEATURES   : number of input columns (must be a multiple of LANES)
 //   OUT_FEATURES  : number of output rows processed by this invocation
-//                   (may be > TILE_ROWS; caller loops externally)
 //   USE_SPARSITY  : 0 = dense, 1 = read sparse_mask stream and skip zeros
 //
 // Ports:
-//   hbm_w_in      : packed INT4 weights, row-major, one beat = LANES bytes.
-//   hbm_mask_in   : (if USE_SPARSITY) one mask beat per weight beat.
+//   hbm_w_in      : packed INT4 weights, row-major, one beat = LANES/2 bytes.
+//   hbm_mask_in   : (if USE_SPARSITY) one mask bit per MAC.
 //   hbm_a_in      : INT8 activations, one beat = LANES bytes.
 //   scales        : per-output-row float scale, TILE_ROWS entries.
 //   y_out         : INT32 partial sums, one per output row.
@@ -92,29 +94,21 @@ void matvec_int4_tile(
     const scale_t                   scales[TILE_ROWS],
     hls::stream<ap_int<32>>&        y_out
 ) {
-    // Interface pragmas -----------------------------------------------------
 #pragma HLS INTERFACE axis      port=hbm_w_in
 #pragma HLS INTERFACE axis      port=hbm_mask_in
 #pragma HLS INTERFACE axis      port=hbm_a_in
 #pragma HLS INTERFACE bram      port=scales
 #pragma HLS INTERFACE axis      port=y_out
 #pragma HLS INTERFACE mode=ap_ctrl_chain port=return
-
-    // Ensure template parameters are visible to HLS
 #pragma HLS INLINE off
 
-    constexpr int PAIRS_PER_BEAT = LANES * 2;               // two int4 per byte
-    constexpr int BEATS_PER_ROW  = IN_FEATURES / PAIRS_PER_BEAT;
-    static_assert(IN_FEATURES % PAIRS_PER_BEAT == 0,
-                  "IN_FEATURES must be a multiple of LANES*2");
+    constexpr int BEATS_PER_ROW = IN_FEATURES / LANES;
+    static_assert(IN_FEATURES % LANES == 0,
+                  "IN_FEATURES must be a multiple of LANES");
 
-    // Accumulators partitioned across PEs ------------------------------------
     ap_int<32> accum[TILE_ROWS];
 #pragma HLS ARRAY_PARTITION variable=accum complete dim=1
 
-    // One tile processes TILE_ROWS output rows.
-    // If OUT_FEATURES > TILE_ROWS the caller invokes this kernel multiple
-    // times (time-multiplex) or replicates the tile spatially.
     const int tile_iterations = (OUT_FEATURES + TILE_ROWS - 1) / TILE_ROWS;
 
     for (int tile_iter = 0; tile_iter < tile_iterations; ++tile_iter) {
@@ -123,7 +117,6 @@ void matvec_int4_tile(
                 ? (OUT_FEATURES - tile_iter * TILE_ROWS)
                 : TILE_ROWS;
 
-        // Load per-row scales into local registers ---------------------------
         scale_t row_scale[TILE_ROWS];
 #pragma HLS ARRAY_PARTITION variable=row_scale complete dim=1
         for (int r = 0; r < TILE_ROWS; ++r) {
@@ -132,7 +125,6 @@ void matvec_int4_tile(
             accum[r] = 0;
         }
 
-        // Process rows -------------------------------------------------------
     ROWS:
         for (int r = 0; r < rows_this_iter; ++r) {
         COLS:
@@ -144,43 +136,35 @@ void matvec_int4_tile(
                 if (USE_SPARSITY) {
                     mask_beat = hbm_mask_in.read();
                 } else {
-                    mask_beat = ~sparse_mask_beat_t(0); // all ones
+                    mask_beat = ~sparse_mask_beat_t(0);
                 }
 
                 ap_int<32> partial = 0;
 
             LANES_LOOP:
-                for (int lane = 0; lane < LANES; ++lane) {
+                for (int lane = 0; lane < W_BEAT_BYTES; ++lane) {
 #pragma HLS UNROLL
-                    // Each byte contains two int4 nibbles.
-                    ap_uint<8> w_byte = w_beat.range(8 * lane + 7, 8 * lane);
-                    ap_int<4> w_lo = w_byte.range(3, 0).v;
-                    ap_int<4> w_hi = w_byte.range(7, 4).v;
+                    // One weight byte holds two int4 nibbles.
+                    ap_uint<8> w_byte = ap_uint<8>(w_beat.range(8 * lane + 7, 8 * lane));
+                    ap_int<4> w_lo = ap_int<4>(ap_uint<4>(w_byte.range(3, 0)));
+                    ap_int<4> w_hi = ap_int<4>(ap_uint<4>(w_byte.range(7, 4)));
 
-                    // Each activation byte feeds one lane (one int8 value).
-                    // Activations are NOT interleaved; one a_beat holds
-                    // exactly LANES consecutive INT8 values.
-                    ap_int<8> a_val = a_beat.range(8 * lane + 7, 8 * lane).v;
+                    // Two activation bytes per weight byte (one per nibble).
+                    ap_int<8> a_lo = ap_int<8>(ap_uint<8>(a_beat.range(16 * lane + 7,  16 * lane + 0)));
+                    ap_int<8> a_hi = ap_int<8>(ap_uint<8>(a_beat.range(16 * lane + 15, 16 * lane + 8)));
 
-                    // Two weight pairs per lane byte.
-                    ap_uint<2> mask_pair = mask_beat.range(2 * lane + 1, 2 * lane).v;
+                    // Two mask bits per weight byte.
+                    ap_uint<2> mask_pair = ap_uint<2>(mask_beat.range(2 * lane + 1, 2 * lane));
 
-                    // Pair 0 (low nibble)
                     if (mask_pair[0]) {
-                        ap_int<32> prod0 = ap_int<32>(w_lo) * ap_int<32>(a_val);
-                        partial += prod0;
+                        partial += ap_mul<32>(w_lo, a_lo);
                     }
-                    // Pair 1 (high nibble)
                     if (mask_pair[1]) {
-                        ap_int<32> prod1 = ap_int<32>(w_hi) * ap_int<32>(a_val);
-                        partial += prod1;
+                        partial += ap_mul<32>(w_hi, a_hi);
                     }
                 }
                 accum[r] += partial;
             }
-            // Apply per-row scale and emit
-            // In real hardware the scale multiply happens here; in the stub
-            // we keep INT32 out and let the caller handle requant.
             y_out.write(accum[r]);
         }
     }
