@@ -24,10 +24,15 @@
 #endif
 
 #include "matvec_int4.hpp"
+#include "matvec_int3.hpp"
+#include "matvec_int2.hpp"
+#include "sparse_matvec.hpp"
+#include "kv_bfp4.hpp"
 #include "rmsnorm_engine.hpp"
 #include "silu_lut.hpp"
 #include "softmax_engine.hpp"
 #include "rope_engine.hpp"
+#include "token_loop_ctrl.hpp"
 
 #include <cmath>
 #include <cstdint>

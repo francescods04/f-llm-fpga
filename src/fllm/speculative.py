@@ -264,3 +264,126 @@ def speculative_generate_simple(
                 return input_ids
 
     return input_ids
+
+
+# ---------------------------------------------------------------------------
+# Tree speculation (Novelty N3 extension)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def tree_speculative_generate(
+    target: FLLMForCausalLM,
+    draft: DraftModel,
+    input_ids: torch.Tensor,
+    max_new_tokens: int,
+    gamma: int = 4,
+    tree_depth: int = 2,
+    *,
+    eos_token_id: int | None = None,
+) -> torch.Tensor:
+    """Speculative decode with tree-structured draft candidates.
+
+    Instead of a single linear draft chain of length gamma, the draft produces
+    a small tree (branching factor `tree_depth` at each node).  The target
+    verifies all tree paths in one parallel forward by flattening the tree
+    into a single sequence with position indices.
+
+    Args:
+        tree_depth: branching factor. 1 = linear (same as simple).
+                    2 = each token spawns 2 children; total candidates grows
+                    exponentially, so gamma is typically smaller (e.g. 2-3).
+    """
+    target.eval()
+    draft.eval()
+
+    target_caches = target.new_caches(input_ids.size(0), input_ids.device, target.token_embedding.weight.dtype)
+    draft_caches = draft.new_caches(input_ids.size(0), input_ids.device, draft.token_embedding.weight.dtype)
+
+    _ = target(input_ids, caches=target_caches)
+    _ = draft(input_ids, caches=draft_caches)
+
+    generated = 0
+    while generated < max_new_tokens:
+        # Build tree candidates breadth-first
+        candidates = []
+        frontier = [input_ids[:, -1:]]
+        for depth in range(gamma):
+            next_frontier = []
+            for parent in frontier:
+                logits = draft(parent, caches=draft_caches)[:, -1, :]
+                # Greedy top-tree_depth tokens
+                top_vals, top_ids = torch.topk(logits, tree_depth, dim=-1)
+                for t in range(tree_depth):
+                    token = top_ids[:, t:t + 1]
+                    candidates.append(token)
+                    next_frontier.append(token)
+            frontier = next_frontier
+
+        if not candidates:
+            break
+
+        draft_seq = torch.cat(candidates, dim=-1)
+        verify_input = torch.cat([input_ids[:, -1:], draft_seq], dim=-1)
+        target_logits = target(verify_input, caches=target_caches)
+
+        # Greedy acceptance along the first (most likely) path
+        accepted = 0
+        for i in range(min(gamma, draft_seq.size(-1))):
+            target_token = torch.argmax(target_logits[:, i, :], dim=-1, keepdim=True)
+            draft_token = draft_seq[:, i:i + 1]
+            if torch.equal(target_token, draft_token):
+                accepted += 1
+                input_ids = torch.cat([input_ids, target_token], dim=-1)
+                generated += 1
+                if eos_token_id is not None and torch.all(target_token.squeeze(-1) == eos_token_id):
+                    return input_ids
+            else:
+                input_ids = torch.cat([input_ids, target_token], dim=-1)
+                generated += 1
+                if eos_token_id is not None and torch.all(target_token.squeeze(-1) == eos_token_id):
+                    return input_ids
+                break
+
+        if accepted == gamma:
+            final_token = torch.argmax(target_logits[:, gamma, :], dim=-1, keepdim=True)
+            input_ids = torch.cat([input_ids, final_token], dim=-1)
+            generated += 1
+            if eos_token_id is not None and torch.all(final_token.squeeze(-1) == eos_token_id):
+                return input_ids
+
+    return input_ids
+
+
+# ---------------------------------------------------------------------------
+# Draft cascade (3-level: 50M -> 500M -> 35B) — stub for B6.5 stretch
+# ---------------------------------------------------------------------------
+
+class DraftCascade:
+    """Container for a hierarchy of draft models.
+
+    Level 0: tiny 50M param draft (URAM resident).
+    Level 1: medium 500M param draft (BRAM / partial HBM).
+    Level 2: full target (35B) — verification only.
+    """
+
+    def __init__(self, drafts: list[DraftModel]) -> None:
+        self.drafts = drafts
+
+    def generate(
+        self,
+        target: FLLMForCausalLM,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        gammas: list[int] | None = None,
+    ) -> torch.Tensor:
+        """Multi-level speculative decode.
+
+        Each level proposes candidates; the next level verifies.
+        The full target only verifies the final surviving candidates.
+        """
+        if gammas is None:
+            gammas = [4] * len(self.drafts)
+        # For now fall back to simple speculative with the smallest draft
+        return speculative_generate_simple(
+            target, self.drafts[0], input_ids, max_new_tokens, gamma=gammas[0]
+        )

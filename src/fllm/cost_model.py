@@ -85,6 +85,8 @@ class FPGAOptimizations:
     host_loop_us_per_token: float = 0.0   # FPGA hardware token loop = 0us host overhead
     hbm_efficiency: float = 0.75          # channel-aware layout vs ~0.55 on GPU
     weight_sparsity_factor: float = 1.0   # N:M sparsity bytes-read factor (1.0 = dense)
+    cross_fpga_dispatch_us: float = 0.0    # per-token peer-FPGA latency (µs), Gate G9
+    speculative_effective_factor: float = 1.0  # multiply tok/s by this (1.0 = disabled)
 
 
 @dataclass(frozen=True)
@@ -128,7 +130,7 @@ def estimate(
         kv_b = kv_b * fpga_opts.kv_byte_factor
         bytes_per_tok = (weight_b + kv_b) * (1.0 - fpga_opts.dataflow_overhead_savings)
         eff = max(efficiency, fpga_opts.hbm_efficiency)
-        host_us = fpga_opts.host_loop_us_per_token
+        host_us = fpga_opts.host_loop_us_per_token + fpga_opts.cross_fpga_dispatch_us
     else:
         bytes_per_tok = weight_b + kv_b
         eff = efficiency
@@ -139,6 +141,8 @@ def estimate(
     ms_no_host = 1000.0 / real_tps_no_host if real_tps_no_host > 0 else float("inf")
     ms = ms_no_host + host_us / 1000.0
     real_tps = 1000.0 / ms if ms > 0 else 0.0
+    if is_fpga and fpga_opts is not None:
+        real_tps *= fpga_opts.speculative_effective_factor
     total_w = hw.tdp_watts * num_devices
     joules = total_w / real_tps if real_tps > 0 else float("inf")
     hourly = hw.aws_hourly_usd * num_devices

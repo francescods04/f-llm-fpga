@@ -25,6 +25,10 @@ class BFPConfig:
     mantissa_bits: int = 8
     block_size: int = 32
 
+    @property
+    def is_bfp4(self) -> bool:
+        return self.mantissa_bits == 4
+
 
 def _qmax(bits: int) -> int:
     return (1 << (bits - 1)) - 1

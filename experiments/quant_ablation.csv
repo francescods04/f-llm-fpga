@@ -1,0 +1,9 @@
+stage,quant_bits,weight_group_size,kv_format,kv_block_size,context_len,ppl_delta_vs_bf16,notes
+BF16_reference,16,-1,FP16,-1,1024,0.0,Locked quality floor
+INT4_per_channel,4,-1,FP16,-1,1024,TBD,Current FPGA default
+INT4_group_64,4,64,FP16,-1,1024,TBD,Ablate group size
+INT3_group_64,3,64,FP16,-1,1024,TBD,Gate G4
+INT2_ternary,2,-1,FP16,-1,1024,TBD,Gate G5
+BFP8_kv,4,-1,BFP8,32,1024,TBD,Baseline KV
+BFP4_kv,4,-1,BFP4,32,1024,TBD,Gate G7
+INT4+BFP8+2:4_sparse,4,-1,BFP8,32,1024,TBD,Stack L1+L2+L3

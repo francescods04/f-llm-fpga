@@ -54,12 +54,21 @@ class ModelShape:
     weight_bits: int = 4
     kv_bits: int = 8           # BFP8 mantissa width
     expert_cache_hit: float = 0.60
+    use_sparse_skip: bool = False   # B4: skip zero rows in matvec
+    sparse_density: float = 1.0     # fraction of non-zero rows
+    cross_fpga_dispatch_us: float = 0.0  # C4: peer latency
+    speculative_effective_factor: float = 1.0  # B6: speed-up from spec decode
 
 
-def matvec_cycles(out_features: int, in_features: int, tile: TileSpec) -> int:
-    """One matvec on the tile bank. II=1 pipelined."""
+def matvec_cycles(out_features: int, in_features: int, tile: TileSpec, density: float = 1.0) -> int:
+    """One matvec on the tile bank. II=1 pipelined.
+
+    If density < 1.0 (structured sparsity), the row count is reduced
+    proportionally because zero rows are skipped by the controller.
+    """
     parallel_rows = tile.tile_rows * tile.num_tiles
-    rows = (out_features + parallel_rows - 1) // parallel_rows
+    active_rows = int((out_features * density + parallel_rows - 1) // parallel_rows * parallel_rows)
+    rows = (active_rows + parallel_rows - 1) // parallel_rows
     beats_per_row = (in_features + tile.lanes - 1) // tile.lanes
     pipeline_fill = beats_per_row + tile.tile_rows  # warm-up
     return rows * beats_per_row + pipeline_fill
@@ -81,12 +90,13 @@ def attention_cycles(shape: ModelShape, tile: TileSpec) -> int:
 
 
 def moe_cycles(shape: ModelShape, tile: TileSpec) -> int:
-    router = matvec_cycles(shape.num_experts, shape.hidden, tile)
+    density = shape.sparse_density if shape.use_sparse_skip else 1.0
+    router = matvec_cycles(shape.num_experts, shape.hidden, tile, density)
     topk = 8  # bitonic stage latency
     per_expert = (
-        matvec_cycles(shape.moe_inner, shape.hidden, tile)        # up
-        + matvec_cycles(shape.moe_inner, shape.hidden, tile)      # gate
-        + matvec_cycles(shape.hidden, shape.moe_inner, tile)      # down
+        matvec_cycles(shape.moe_inner, shape.hidden, tile, density)        # up
+        + matvec_cycles(shape.moe_inner, shape.hidden, tile, density)      # gate
+        + matvec_cycles(shape.hidden, shape.moe_inner, tile, density)      # down
     )
     return router + topk + shape.active_experts * per_expert
 
@@ -140,6 +150,11 @@ def hbm_bytes_per_token(shape: ModelShape) -> float:
     return weight_bytes + kv_read + kv_write
 
 
+def cross_fpga_ms(shape: ModelShape) -> float:
+    """Extra ms/token from peer-FPGA dispatch (Gate G9)."""
+    return shape.cross_fpga_dispatch_us / 1000.0
+
+
 @dataclass(frozen=True)
 class CycleReport:
     cycles_per_token: int
@@ -177,6 +192,14 @@ def estimate_token(shape: ModelShape, tile: TileSpec) -> CycleReport:
         bottleneck = "hbm"
         realized_tps = hbm_tps
         realized_ms = hbm_ms
+
+    # Apply cross-FPGA dispatch latency (C4)
+    realized_ms += cross_fpga_ms(shape)
+    realized_tps = 1000.0 / realized_ms if realized_ms > 0 else 0.0
+
+    # Apply speculative decode speed-up (B6)
+    realized_tps *= shape.speculative_effective_factor
+    realized_ms = 1000.0 / realized_tps if realized_tps > 0 else float("inf")
 
     return CycleReport(
         cycles_per_token=total,

@@ -29,6 +29,7 @@ class QuantConfig:
     weight_group_size: int = -1  # -1 = per output channel only
     nm_sparsity: NMSparsity | None = None  # optional N:M structured pruning
     use_int2: bool = False  # ternary {-1, 0, +1} weights (2-bit packed)
+    use_int3: bool = False  # 3-bit weights (range -4..+3) for ablations
 
 
 def _qmax(bits: int) -> int:
@@ -51,6 +52,24 @@ def ste_round(x: torch.Tensor) -> torch.Tensor:
 
 def fake_quant_weight(weight: torch.Tensor, bits: int, group_size: int = -1) -> torch.Tensor:
     qmax = _qmax(bits)
+    if group_size <= 0 or group_size >= weight.size(-1):
+        scale = weight.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8) / qmax
+        q = ste_round(weight / scale).clamp(-qmax - 1, qmax)
+        return q * scale
+
+    out_features, in_features = weight.shape
+    if in_features % group_size != 0:
+        raise ValueError("group_size must divide in_features")
+    groups = in_features // group_size
+    w = weight.reshape(out_features, groups, group_size)
+    scale = w.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8) / qmax
+    q = ste_round(w / scale).clamp(-qmax - 1, qmax)
+    return (q * scale).reshape(out_features, in_features)
+
+
+def fake_quant_weight_int3(weight: torch.Tensor, group_size: int = 64) -> torch.Tensor:
+    """Fake-quant to symmetric INT3 (range -4 .. +3) with per-group scales."""
+    qmax = _qmax(3)  # 3 bits -> max 3
     if group_size <= 0 or group_size >= weight.size(-1):
         scale = weight.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8) / qmax
         q = ste_round(weight / scale).clamp(-qmax - 1, qmax)
@@ -104,7 +123,10 @@ class QuantLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         xq = fake_quant_activation(x, self.qcfg.activation_bits)
-        wq = fake_quant_weight(self.weight, self.qcfg.weight_bits, self.qcfg.weight_group_size)
+        if self.qcfg.use_int3:
+            wq = fake_quant_weight_int3(self.weight, self.qcfg.weight_group_size)
+        else:
+            wq = fake_quant_weight(self.weight, self.qcfg.weight_bits, self.qcfg.weight_group_size)
         return torch.nn.functional.linear(xq, wq)
 
 

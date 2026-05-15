@@ -1,0 +1,9 @@
+lever,budget_ppl,measured_ppl,status,date,gate
+INT4 W + INT8 A,0.20,TBD,pending,TBD,G2
+BFP8 KV @ 4k,0.10,TBD,pending,TBD,G7
+BFP4 KV @ 4k,0.20,TBD,pending,TBD,G7
+INT3 global,0.30,TBD,pending,TBD,G4
+Ternary cold experts,0.20,TBD,pending,TBD,G5
+1:4 sparse cold (retrained),0.20,TBD,pending,TBD,G6
+Cache-aware routing (λ tuned),0.30,TBD,pending,TBD,G3
+Spec decode (lossless),0.00,TBD,pending,TBD,G8
