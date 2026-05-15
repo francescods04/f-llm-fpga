@@ -74,6 +74,19 @@ MODELS: dict[str, ModelSpec] = {
 
 
 @dataclass(frozen=True)
+class FPGAOptimizations:
+    """Stackable FPGA-only wins. Each is a fraction in [0, 1] applied to a
+    relevant traffic term, not the final tok/s. See docs/FPGA_OPTIMIZATIONS.md
+    for the engineering justification of every default value.
+    """
+    expert_cache_hit_rate: float = 0.60   # fraction of expert reads served on-chip
+    kv_byte_factor: float = 0.51          # BFP8 KV vs FP16 KV
+    dataflow_overhead_savings: float = 0.15  # fraction of HBM round-trips removed
+    host_loop_us_per_token: float = 0.0   # FPGA hardware token loop = 0us host overhead
+    hbm_efficiency: float = 0.75          # channel-aware layout vs ~0.55 on GPU
+
+
+@dataclass(frozen=True)
 class CostResult:
     hardware: str
     model: str
@@ -83,6 +96,7 @@ class CostResult:
     ms_per_token: float
     joule_per_token: float
     usd_per_million_tokens: float
+    bytes_per_token: float
     notes: str
 
 
@@ -100,25 +114,43 @@ def estimate(
     *,
     efficiency: float = 0.6,
     avg_seq_len: int = 1024,
+    fpga_opts: FPGAOptimizations | None = None,
+    is_fpga: bool = False,
+    num_devices: int = 1,
 ) -> CostResult:
-    bw_bytes = hw.hbm_bandwidth_gbs * 1e9
+    bw_bytes = hw.hbm_bandwidth_gbs * 1e9 * num_devices
     weight_b = active_weight_bytes(model)
     kv_b = model.kv_bytes_per_token * avg_seq_len
-    bytes_per_tok = weight_b + kv_b
-    peak_tps = bw_bytes / bytes_per_tok
-    real_tps = peak_tps * efficiency
-    ms = 1000.0 / real_tps if real_tps > 0 else float("inf")
-    joules = hw.tdp_watts / real_tps if real_tps > 0 else float("inf")
-    usd_per_1m = (hw.aws_hourly_usd / 3600.0) / real_tps * 1e6 if real_tps > 0 else float("inf")
-    fits = total_weight_bytes(model) <= hw.hbm_capacity_gb * 1e9
+
+    if is_fpga and fpga_opts is not None:
+        weight_b = weight_b * (1.0 - fpga_opts.expert_cache_hit_rate)
+        kv_b = kv_b * fpga_opts.kv_byte_factor
+        bytes_per_tok = (weight_b + kv_b) * (1.0 - fpga_opts.dataflow_overhead_savings)
+        eff = max(efficiency, fpga_opts.hbm_efficiency)
+        host_us = fpga_opts.host_loop_us_per_token
+    else:
+        bytes_per_tok = weight_b + kv_b
+        eff = efficiency
+        host_us = 60.0  # typical CUDA stream cycle + sampling roundtrip at batch=1
+
+    peak_tps = bw_bytes / bytes_per_tok if bytes_per_tok > 0 else 0.0
+    real_tps_no_host = peak_tps * eff
+    ms_no_host = 1000.0 / real_tps_no_host if real_tps_no_host > 0 else float("inf")
+    ms = ms_no_host + host_us / 1000.0
+    real_tps = 1000.0 / ms if ms > 0 else 0.0
+    total_w = hw.tdp_watts * num_devices
+    joules = total_w / real_tps if real_tps > 0 else float("inf")
+    hourly = hw.aws_hourly_usd * num_devices
+    usd_per_1m = (hourly / 3600.0) / real_tps * 1e6 if real_tps > 0 else float("inf")
+    fits = total_weight_bytes(model) <= hw.hbm_capacity_gb * 1e9 * num_devices
     note = ""
     if not fits:
         note = (
             f"model weights {total_weight_bytes(model)/1e9:.1f}GB "
-            f"exceed device HBM {hw.hbm_capacity_gb}GB; would need multi-device shard"
+            f"exceed device HBM {hw.hbm_capacity_gb*num_devices}GB across {num_devices} device(s)"
         )
     return CostResult(
-        hardware=hw.name,
+        hardware=hw.name + (f" x{num_devices}" if num_devices > 1 else ""),
         model=model.name,
         fits_in_memory=fits,
         peak_tokens_per_s=peak_tps,
@@ -126,6 +158,7 @@ def estimate(
         ms_per_token=ms,
         joule_per_token=joules,
         usd_per_million_tokens=usd_per_1m,
+        bytes_per_token=bytes_per_tok,
         notes=note,
     )
 
@@ -136,10 +169,58 @@ def compare(
     fpga_efficiency: float = 0.70,
     gpu_efficiency: float = 0.55,
     avg_seq_len: int = 1024,
+    fpga_opts: FPGAOptimizations | None = None,
+    fpga_shard_devices: int = 2,
 ) -> list[CostResult]:
+    """Compare a model across all hardware targets.
+
+    For FPGA paths, runs both:
+      - "naive port": GPU-style traffic with `gpu_efficiency`
+      - "FPGA-tuned": applies `fpga_opts` (expert cache, BFP KV, dataflow, host)
+    The naive number lets us read the *delta* attributable to FPGA-specific work.
+    """
     model = MODELS[model_key]
-    results = []
+    opts = fpga_opts or FPGAOptimizations()
+    results: list[CostResult] = []
     for hw_key, hw in HARDWARES.items():
-        eff = fpga_efficiency if hw_key.startswith("fpga") else gpu_efficiency
-        results.append(estimate(hw, model, efficiency=eff, avg_seq_len=avg_seq_len))
+        if hw_key.startswith("fpga"):
+            naive = estimate(
+                hw, model, efficiency=gpu_efficiency, avg_seq_len=avg_seq_len,
+                is_fpga=False, num_devices=fpga_shard_devices,
+            )
+            results.append(
+                CostResult(
+                    hardware=naive.hardware + " [naive port]",
+                    model=naive.model, fits_in_memory=naive.fits_in_memory,
+                    peak_tokens_per_s=naive.peak_tokens_per_s,
+                    realistic_tokens_per_s=naive.realistic_tokens_per_s,
+                    ms_per_token=naive.ms_per_token,
+                    joule_per_token=naive.joule_per_token,
+                    usd_per_million_tokens=naive.usd_per_million_tokens,
+                    bytes_per_token=naive.bytes_per_token,
+                    notes=naive.notes,
+                )
+            )
+            tuned = estimate(
+                hw, model, efficiency=fpga_efficiency, avg_seq_len=avg_seq_len,
+                is_fpga=True, fpga_opts=opts, num_devices=fpga_shard_devices,
+            )
+            results.append(
+                CostResult(
+                    hardware=tuned.hardware + " [tuned]",
+                    model=tuned.model, fits_in_memory=tuned.fits_in_memory,
+                    peak_tokens_per_s=tuned.peak_tokens_per_s,
+                    realistic_tokens_per_s=tuned.realistic_tokens_per_s,
+                    ms_per_token=tuned.ms_per_token,
+                    joule_per_token=tuned.joule_per_token,
+                    usd_per_million_tokens=tuned.usd_per_million_tokens,
+                    bytes_per_token=tuned.bytes_per_token,
+                    notes=tuned.notes,
+                )
+            )
+        else:
+            results.append(estimate(
+                hw, model, efficiency=gpu_efficiency, avg_seq_len=avg_seq_len,
+                is_fpga=False,
+            ))
     return results
