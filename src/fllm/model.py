@@ -12,6 +12,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from fllm.attention import GQAttention, KVCache
 from fllm.config import FLLMConfig
 from fllm.moe import MoEMLP
 
@@ -83,12 +84,16 @@ class FLLMBlock(nn.Module):
     def __init__(self, config: FLLMConfig) -> None:
         super().__init__()
         self.attn_norm = RMSNorm(config.hidden_size)
-        self.attn = LocalCausalSelfAttention(config)
+        self.attn = GQAttention(config) if config.use_gqa else LocalCausalSelfAttention(config)
         self.mlp_norm = RMSNorm(config.hidden_size)
         self.mlp = MoEMLP(config) if config.use_moe else MLP(config)
+        self.use_gqa = config.use_gqa
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x))
+    def forward(self, x: torch.Tensor, *, cache: KVCache | None = None) -> torch.Tensor:
+        if self.use_gqa:
+            x = x + self.attn(self.attn_norm(x), cache=cache)
+        else:
+            x = x + self.attn(self.attn_norm(x))
         x = x + self.mlp(self.mlp_norm(x))
         return x
 
@@ -114,16 +119,39 @@ class FLLMForCausalLM(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        caches: list[KVCache] | None = None,
+    ) -> torch.Tensor:
         batch, seq_len = input_ids.shape
-        if seq_len > self.config.context_length:
+        if caches is None and seq_len > self.config.context_length:
             raise ValueError("sequence length exceeds configured context_length")
 
-        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-        x = self.token_embedding(input_ids) + self.position_embedding(positions)
-        for block in self.blocks:
-            x = block(x)
+        x = self.token_embedding(input_ids)
+        if not self.config.use_rope:
+            offset = caches[0].length if caches is not None and len(caches) > 0 else 0
+            positions = torch.arange(offset, offset + seq_len, device=input_ids.device).unsqueeze(0)
+            x = x + self.position_embedding(positions)
+        for idx, block in enumerate(self.blocks):
+            cache = caches[idx] if caches is not None else None
+            x = block(x, cache=cache) if self.config.use_gqa else block(x)
         return self.lm_head(self.final_norm(x))
+
+    def new_caches(self, batch: int, device, dtype) -> list[KVCache]:
+        return [block.attn.new_cache(batch, device, dtype) for block in self.blocks]
+
+    def collect_aux_loss(self) -> torch.Tensor:
+        """Sum of last MoE aux losses across blocks. Zero if no MoE."""
+        total = torch.zeros((), device=self.token_embedding.weight.device)
+        if not self.config.use_moe:
+            return total
+        from fllm.moe import MoEMLP
+        for block in self.blocks:
+            if isinstance(block.mlp, MoEMLP):
+                total = total + block.mlp.last_aux_loss()
+        return total
 
     @torch.no_grad()
     def generate(
@@ -137,6 +165,18 @@ class FLLMForCausalLM(nn.Module):
         repetition_penalty: float = 1.0,
     ) -> torch.Tensor:
         self.eval()
+        if self.config.use_gqa:
+            caches = self.new_caches(input_ids.size(0), input_ids.device, self.token_embedding.weight.dtype)
+            _ = self(input_ids, caches=caches)
+            for _ in range(max_new_tokens):
+                logits = self(input_ids[:, -1:], caches=caches)[:, -1, :]
+                logits = apply_repetition_penalty(logits, input_ids, repetition_penalty)
+                next_token = sample_next_token(logits, temperature=temperature, top_k=top_k)
+                input_ids = torch.cat([input_ids, next_token], dim=-1)
+                if eos_token_id is not None and torch.all(next_token.squeeze(-1) == eos_token_id):
+                    break
+            return input_ids
+
         for _ in range(max_new_tokens):
             context = input_ids[:, -self.config.context_length :]
             logits = self(context)[:, -1, :]

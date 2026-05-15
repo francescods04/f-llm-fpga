@@ -17,6 +17,7 @@ class FLLMConfig:
     hidden_size: int = 256
     num_layers: int = 6
     num_heads: int = 4
+    num_kv_heads: int = 0  # 0 -> MHA (num_kv_heads=num_heads); >0 -> GQA
     local_window: int = 256
     compressed_block_size: int = 16
     compressed_top_k: int = 8
@@ -27,3 +28,10 @@ class FLLMConfig:
     use_moe: bool = False
     num_experts: int = 16
     active_experts: int = 2
+    moe_inner_size: int = 0  # 0 -> use hidden * mlp_ratio; >0 -> use this per-expert
+    use_rope: bool = False
+    rope_theta: float = 10000.0
+    use_gqa: bool = False
+
+    def kv_heads(self) -> int:
+        return self.num_kv_heads if self.num_kv_heads > 0 else self.num_heads

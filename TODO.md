@@ -18,6 +18,11 @@ This is the working checklist for turning the project into a defensible paper.
 - [x] Add local attention over a fixed window.
 - [ ] Add compressed global context blocks.
 - [x] Add optional low-bit MoE block in software.
+- [x] Add GQA + RoPE + persistent KV cache (Qwen3 architecture parity).
+- [x] Add MoE auxiliary load-balance loss (Switch Transformer style).
+- [x] Add HF config.json loader -> FLLMConfig (shape parity check).
+- [x] Add end-to-end FPGA-sim forward (INT4 W + INT8 A + BFP8 KV + LUT acts).
+- [x] Add per-kernel cycle simulator.
 - [ ] Add a hierarchical or streaming LM head.
 - [x] Add greedy decoding.
 - [x] Add deterministic benchmark prompts.

@@ -40,7 +40,7 @@ class MoEMLP(nn.Module):
         super().__init__()
         if config.active_experts <= 0 or config.active_experts > config.num_experts:
             raise ValueError("active_experts must be in (0, num_experts]")
-        inner = config.hidden_size * config.mlp_ratio
+        inner = config.moe_inner_size if config.moe_inner_size > 0 else config.hidden_size * config.mlp_ratio
         self.num_experts = config.num_experts
         self.active_experts = config.active_experts
         self.router = nn.Linear(config.hidden_size, config.num_experts, bias=False)
@@ -53,6 +53,7 @@ class MoEMLP(nn.Module):
         batch, seq_len, hidden = x.shape
         flat = x.reshape(-1, hidden)
         logits = self.router(flat)
+        probs_all = F.softmax(logits, dim=-1)
         top_vals, top_idx = torch.topk(logits, self.active_experts, dim=-1)
         gates = F.softmax(top_vals, dim=-1)
 
@@ -68,7 +69,25 @@ class MoEMLP(nn.Module):
                 out[mask] = out[mask] + slot_gate[mask] * self.experts[expert_id](tokens)
 
         out = out.reshape(batch, seq_len, hidden)
+        self._last_aux_loss = self._compute_aux_loss(probs_all, top_idx)
         return self.dropout(out)
+
+    def _compute_aux_loss(self, probs_all: torch.Tensor, top_idx: torch.Tensor) -> torch.Tensor:
+        """Switch Transformer auxiliary load-balance loss.
+
+        Penalty = num_experts * sum_i (f_i * P_i), where:
+          f_i = fraction of tokens routed to expert i (over top-k slots),
+          P_i = mean router probability for expert i.
+        Scale so a perfectly balanced router yields aux_loss = 1.
+        """
+        num_tokens = top_idx.size(0)
+        mask = F.one_hot(top_idx, num_classes=self.num_experts).float()
+        f_i = mask.sum(dim=(0, 1)) / (num_tokens * self.active_experts)
+        p_i = probs_all.mean(dim=0)
+        return self.num_experts * (f_i * p_i).sum()
+
+    def last_aux_loss(self) -> torch.Tensor:
+        return getattr(self, "_last_aux_loss", torch.tensor(0.0))
 
     def routing_stats(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         """Diagnostic: mean expert load and entropy of routing distribution."""

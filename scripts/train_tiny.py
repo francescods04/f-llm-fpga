@@ -75,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-temperature", type=float, default=0.8)
     parser.add_argument("--sample-top-k", type=int, default=40)
     parser.add_argument("--repetition-penalty", type=float, default=1.1)
+    parser.add_argument("--aux-loss-weight", type=float, default=0.01,
+                        help="weight for MoE load-balance auxiliary loss (Switch-style)")
     return parser
 
 
@@ -131,7 +133,9 @@ def main() -> None:
             device=device,
         )
         logits = model(x)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+        ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+        aux_loss = model.collect_aux_loss()
+        loss = ce_loss + args.aux_loss_weight * aux_loss
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()

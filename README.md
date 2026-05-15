@@ -73,6 +73,29 @@ Print the current FPGA-vs-GPU projection:
 PYTHONPATH=src python3 scripts/cost_report.py
 ```
 
+Inspect the Qwen3-A3B target shape and instantiate the matching FLLM config:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_hf_config.py \
+  --emit-template datasets/qwen3-a3b/config.json
+PYTHONPATH=src python3 scripts/inspect_hf_config.py \
+  --config datasets/qwen3-a3b/config.json
+```
+
+Per-kernel cycle budget at chosen FPGA tile parallelism:
+
+```bash
+PYTHONPATH=src python3 scripts/cycle_report.py --num-tiles 16 --tile-rows 32
+```
+
+End-to-end FPGA-equivalent forward (INT4 weights + INT8 acts + BFP8 KV +
+LUT softmax/SiLU/rsqrt) on a trained checkpoint:
+
+```bash
+PYTHONPATH=src python3 scripts/fpga_sim_eval.py \
+  --checkpoint checkpoints/bpe-smoke/model.pt
+```
+
 ## Quickstart
 
 Run a model smoke test:
