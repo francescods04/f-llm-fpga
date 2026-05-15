@@ -153,6 +153,15 @@ class FLLMForCausalLM(nn.Module):
                 total = total + block.mlp.last_aux_loss()
         return total
 
+    def set_vocab_cache(self, cache_token_ids: torch.Tensor) -> None:
+        """Replace lm_head with a VocabCacheLMHead for FPGA-fast inference."""
+        from fllm.vocab_cache import VocabCacheLMHead
+        if self.config.tie_embeddings:
+            raise ValueError("vocab cache not supported with tied embeddings")
+        cached = VocabCacheLMHead(self.lm_head, cache_token_ids)
+        self.lm_head = cached
+        self.config = self.config  # mutable swap
+
     @torch.no_grad()
     def generate(
         self,

@@ -32,6 +32,9 @@ class FLLMConfig:
     use_rope: bool = False
     rope_theta: float = 10000.0
     use_gqa: bool = False
+    use_compressed_global: bool = False
+    use_vocab_cache: bool = False
+    vocab_cache_size: int = 0  # 0 = disabled; >0 = top-k tokens kept on-chip
 
     def kv_heads(self) -> int:
         return self.num_kv_heads if self.num_kv_heads > 0 else self.num_heads
