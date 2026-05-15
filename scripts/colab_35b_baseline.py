@@ -93,81 +93,96 @@ TOTAL_VRAM_GB = torch.cuda.get_device_properties(0).total_memory / 1e9
 print(f"GPU: {GPU_NAME} | VRAM: {TOTAL_VRAM_GB:.1f} GB")
 
 # ---------------------------------------------------------------------------
-# 2. Quantization strategy based on VRAM
+# Backend selection based on VRAM
 # ---------------------------------------------------------------------------
-# FP16 model = ~70 GB. INT4 = ~17.5 GB. INT8 = ~35 GB.
-# We need VRAM >= model_size + activations + KV cache overhead (~5 GB).
-if TOTAL_VRAM_GB >= 85:
+# A100 80GB -> transformers FP16 (native)
+# A100 40GB -> vLLM (much better memory management, can fit 35B INT4)
+# ---------------------------------------------------------------------------
+if TOTAL_VRAM_GB >= 80:
+    backend = "transformers"
     quant_config = None
     dtype = torch.float16
     strategy = "fp16"
-elif TOTAL_VRAM_GB >= 45:
-    # 8-bit via bitsandbytes
-    quant_config = BitsAndBytesConfig(load_in_8bit=True)
-    dtype = torch.float16
-    strategy = "int8"
 else:
-    # 4-bit via bitsandbytes
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-    )
-    dtype = torch.float16
-    strategy = "int4"
+    backend = "vllm"
+    strategy = "vllm_fp16"  # vLLM handles quantization internally
 
-print(f"Selected strategy: {strategy} (VRAM {TOTAL_VRAM_GB:.1f} GB)")
+print(f"Selected backend: {backend} (VRAM {TOTAL_VRAM_GB:.1f} GB)")
 
 # ---------------------------------------------------------------------------
 # 3. Load model
 # ---------------------------------------------------------------------------
-print(f"\n=== Loading {MODEL_NAME} ({strategy}) ===")
+print(f"\n=== Loading {MODEL_NAME} ({backend}) ===")
 print("NOTE: First download may take 10-20 minutes for 35B parameters.")
 
-try:
-    tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+if backend == "transformers":
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            quantization_config=quant_config,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            token=HF_TOKEN,
+        )
+        model.eval()
+    except Exception as e:
+        print(f"ERROR loading model: {e}")
+        print("If the model is not yet public, update MODEL_NAME to the correct HF id.")
+        raise
+else:
+    # vLLM backend
+    print("Installing vLLM...")
+    rc = os.system("pip install -q vllm")
+    if rc != 0:
+        raise RuntimeError("vLLM install failed")
+    from vllm import LLM, SamplingParams
+    llm = LLM(
+        model=MODEL_NAME,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.92,
         trust_remote_code=True,
-        torch_dtype=dtype,
-        quantization_config=quant_config,
-        device_map="auto",
-        low_cpu_mem_usage=True,
-        token=HF_TOKEN,
+        download_dir=None,
     )
-    model.eval()
-except Exception as e:
-    print(f"ERROR loading model: {e}")
-    print("If the model is not yet public, update MODEL_NAME to the correct HF id.")
-    raise
+    tokenizer = llm.get_tokenizer()
 
 # ---------------------------------------------------------------------------
 # 4. Benchmark greedy decode
 # ---------------------------------------------------------------------------
 print("\n=== Greedy decode benchmark ===")
-input_ids = tokenizer(PROMPT, return_tensors="pt").input_ids.to(DEVICE)
 
-# Warm-up (graph compilation / cache allocation)
-with torch.no_grad():
-    _ = model.generate(input_ids, max_new_tokens=2, do_sample=False)
-torch.cuda.synchronize()
-
-# Measure
-torch.cuda.reset_peak_memory_stats()
-t0 = time.time()
-with torch.no_grad():
-    out = model.generate(input_ids, max_new_tokens=GEN_LEN, do_sample=False)
-torch.cuda.synchronize()
-elapsed = time.time() - t0
-peak_mem_gb = torch.cuda.max_memory_allocated() / 1e9
+if backend == "transformers":
+    input_ids = tokenizer(PROMPT, return_tensors="pt").input_ids.to(DEVICE)
+    # Warm-up
+    with torch.no_grad():
+        _ = model.generate(input_ids, max_new_tokens=2, do_sample=False)
+    torch.cuda.synchronize()
+    # Measure
+    torch.cuda.reset_peak_memory_stats()
+    t0 = time.time()
+    with torch.no_grad():
+        out = model.generate(input_ids, max_new_tokens=GEN_LEN, do_sample=False)
+    torch.cuda.synchronize()
+    elapsed = time.time() - t0
+    peak_mem_gb = torch.cuda.max_memory_allocated() / 1e9
+else:
+    # vLLM benchmark
+    sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=GEN_LEN)
+    _ = llm.generate(PROMPT, sampling_params)  # warm-up
+    t0 = time.time()
+    outputs = llm.generate(PROMPT, sampling_params)
+    elapsed = time.time() - t0
+    peak_mem_gb = torch.cuda.max_memory_allocated() / 1e9 if hasattr(torch.cuda, "max_memory_allocated") else 0.0
 
 tok_s = GEN_LEN / elapsed
 ms_per_tok = (elapsed * 1000) / GEN_LEN
 
-print(f"Strategy:        {strategy}")
+print(f"Backend:          {backend}")
+print(f"Strategy:         {strategy}")
 print(f"Tokens generated: {GEN_LEN}")
 print(f"Elapsed time:     {elapsed:.2f} s")
 print(f"Throughput:       {tok_s:.2f} tok/s")
@@ -181,17 +196,17 @@ result = {
     "hardware": GPU_NAME,
     "vram_gb": round(TOTAL_VRAM_GB, 1),
     "model": MODEL_NAME,
+    "backend": backend,
     "quant_strategy": strategy,
     "tok_s": round(tok_s, 2),
     "ms_per_token": round(ms_per_tok, 2),
     "gen_len": GEN_LEN,
     "elapsed_s": round(elapsed, 3),
     "peak_vram_gb": round(peak_mem_gb, 2),
-    "note": "Colab Pro/Pro+; Qwen3.6-35B-A3B decode benchmark. "
-            "This is the real target model baseline for Gate G1.",
+    "note": f"Colab Pro/Pro+ A100 {TOTAL_VRAM_GB:.0f}GB; Qwen3.6-35B-A3B decode benchmark via {backend}. Gate G1 baseline.",
 }
 
-out_path = f"{RESULTS_DIR}/35b_baseline_{strategy}.json"
+out_path = f"{RESULTS_DIR}/35b_baseline_{backend}.json"
 with open(out_path, "w") as f:
     json.dump(result, f, indent=2)
 
@@ -199,7 +214,7 @@ print(f"\nSaved result to {out_path}")
 print("Download this file from the Files panel on the left.")
 
 # ---------------------------------------------------------------------------
-# 6. Quick quality sanity (single prompt consistency check)
+# 6. Quick quality sanity
 # ---------------------------------------------------------------------------
 print("\n=== Quality sanity check ===")
 test_prompts = [
@@ -209,10 +224,15 @@ test_prompts = [
 ]
 
 for p in test_prompts:
-    ids = tokenizer(p, return_tensors="pt").input_ids.to(DEVICE)
-    with torch.no_grad():
-        gen = model.generate(ids, max_new_tokens=20, do_sample=False)
-    text = tokenizer.decode(gen[0], skip_special_tokens=True)
+    if backend == "transformers":
+        ids = tokenizer(p, return_tensors="pt").input_ids.to(DEVICE)
+        with torch.no_grad():
+            gen = model.generate(ids, max_new_tokens=20, do_sample=False)
+        text = tokenizer.decode(gen[0], skip_special_tokens=True)
+    else:
+        sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=20)
+        out = llm.generate(p, sp)
+        text = out[0].outputs[0].text
     print(f"PROMPT: {p}")
     print(f"OUTPUT: {text}\n")
 
