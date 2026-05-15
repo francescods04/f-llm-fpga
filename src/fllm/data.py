@@ -6,14 +6,14 @@ from pathlib import Path
 
 import torch
 
-from fllm.tokenizer import ByteTokenizer
+from fllm.tokenizer import TextTokenizer
 
 
 def load_text(path: str | Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def encode_text(text: str, tokenizer: ByteTokenizer) -> torch.Tensor:
+def encode_text(text: str, tokenizer: TextTokenizer) -> torch.Tensor:
     token_ids = tokenizer.encode(text, add_bos=True, add_eos=True)
     return torch.tensor(token_ids, dtype=torch.long)
 
@@ -40,4 +40,3 @@ def sample_batch(
     x = torch.stack([tokens[start : start + seq_len] for start in starts])
     y = torch.stack([tokens[start + 1 : start + seq_len + 1] for start in starts])
     return x.to(device), y.to(device)
-

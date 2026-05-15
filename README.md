@@ -82,3 +82,15 @@ PYTHONPATH=src python3 benchmarks/benchmark_decode.py \
   --checkpoint checkpoints/tiny/model.pt \
   --new-tokens 64
 ```
+
+For the first minimally useful model, use the BPE/TinyStories path in
+[docs/TRAINING.md](docs/TRAINING.md).
+
+Generate from a checkpoint:
+
+```bash
+PYTHONPATH=src python3 scripts/generate.py \
+  --checkpoint checkpoints/tiny/model.pt \
+  --prompt "Once upon a time" \
+  --new-tokens 120
+```

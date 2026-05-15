@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+import math
 from pathlib import Path
 import time
 
 import torch
 import torch.nn.functional as F
 
+from fllm.checkpoint import save_training_checkpoint
 from fllm.config import FLLMConfig
 from fllm.data import encode_text, load_text, sample_batch, split_tokens
 from fllm.model import FLLMForCausalLM, count_parameters
-from fllm.tokenizer import ByteTokenizer
+from fllm.presets import PRESETS
+from fllm.tokenizer import load_tokenizer
 
 
 def choose_device(requested: str) -> torch.device:
@@ -51,7 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", default="docs/sample_corpus.txt")
     parser.add_argument("--out-dir", default="checkpoints/tiny")
+    parser.add_argument("--tokenizer", default="byte", help="`byte` or path to tokenizer.json")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--preset", choices=sorted(PRESETS), default="custom")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--eval-every", type=int, default=25)
@@ -62,8 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--local-window", type=int, default=32)
+    parser.add_argument("--mlp-ratio", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--no-tie-embeddings", action="store_true")
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--generate-tokens", type=int, default=120)
+    parser.add_argument("--sample-temperature", type=float, default=0.8)
+    parser.add_argument("--sample-top-k", type=int, default=40)
+    parser.add_argument("--repetition-penalty", type=float, default=1.1)
     return parser
 
 
@@ -72,18 +83,28 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = choose_device(args.device)
 
-    tokenizer = ByteTokenizer()
+    tokenizer = load_tokenizer(args.tokenizer)
     text = load_text(args.corpus)
     tokens = encode_text(text, tokenizer)
     train_tokens, val_tokens = split_tokens(tokens)
 
+    preset = PRESETS[args.preset]
+    hidden_size = preset.hidden_size if preset else args.hidden_size
+    num_layers = preset.num_layers if preset else args.num_layers
+    num_heads = preset.num_heads if preset else args.num_heads
+    local_window = preset.local_window if preset else args.local_window
+    mlp_ratio = preset.mlp_ratio if preset else args.mlp_ratio
+
     config = FLLMConfig(
         vocab_size=tokenizer.vocab_size,
         context_length=args.seq_len,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        local_window=args.local_window,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        local_window=local_window,
+        mlp_ratio=mlp_ratio,
+        dropout=args.dropout,
+        tie_embeddings=not args.no_tie_embeddings,
     )
     model = FLLMForCausalLM(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -108,6 +129,8 @@ def main() -> None:
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
 
         if step == 1 or step % args.eval_every == 0 or step == args.steps:
@@ -122,26 +145,33 @@ def main() -> None:
             elapsed = time.perf_counter() - start_time
             print(
                 f"step={step:04d} train_loss={loss.item():.4f} "
-                f"val_loss={val_loss:.4f} elapsed_s={elapsed:.1f}"
+                f"val_loss={val_loss:.4f} val_ppl={math.exp(min(val_loss, 20.0)):.2f} "
+                f"elapsed_s={elapsed:.1f}"
             )
 
     prompt = "Full FPGA inference"
     prompt_ids = torch.tensor([tokenizer.encode(prompt, add_bos=True)], dtype=torch.long, device=device)
-    generated = model.generate(prompt_ids, max_new_tokens=args.generate_tokens)[0].tolist()
+    generated = model.generate(
+        prompt_ids,
+        max_new_tokens=args.generate_tokens,
+        eos_token_id=tokenizer.eos_token_id,
+        temperature=args.sample_temperature,
+        top_k=args.sample_top_k,
+        repetition_penalty=args.repetition_penalty,
+    )[0].tolist()
     generated_text = tokenizer.decode(generated)
     print("--- sample ---")
     print(generated_text)
 
-    checkpoint = {
-        "config": asdict(config),
-        "model_state": model.state_dict(),
-        "tokenizer": {"type": "byte"},
-    }
-    torch.save(checkpoint, out_dir / "model.pt")
+    save_training_checkpoint(
+        path=out_dir / "model.pt",
+        model=model,
+        tokenizer=tokenizer,
+        extra={"corpus": args.corpus, "steps": args.steps, "preset": args.preset},
+    )
     (out_dir / "sample.txt").write_text(generated_text, encoding="utf-8")
     print(f"saved={out_dir / 'model.pt'}")
 
 
 if __name__ == "__main__":
     main()
-

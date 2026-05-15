@@ -37,6 +37,8 @@ class LocalCausalSelfAttention(nn.Module):
         self.local_window = config.local_window
         self.qkv = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=False)
         self.out = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, seq_len, hidden = x.shape
@@ -57,9 +59,10 @@ class LocalCausalSelfAttention(nn.Module):
         scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
 
         probs = F.softmax(scores, dim=-1)
+        probs = self.attn_dropout(probs)
         out = probs @ v
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, hidden)
-        return self.out(out)
+        return self.resid_dropout(self.out(out))
 
 
 class MLP(nn.Module):
@@ -69,9 +72,10 @@ class MLP(nn.Module):
         self.up = nn.Linear(config.hidden_size, inner, bias=False)
         self.gate = nn.Linear(config.hidden_size, inner, bias=False)
         self.down = nn.Linear(inner, config.hidden_size, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down(F.silu(self.gate(x)) * self.up(x))
+        return self.dropout(self.down(F.silu(self.gate(x)) * self.up(x)))
 
 
 class FLLMBlock(nn.Module):
@@ -97,6 +101,17 @@ class FLLMForCausalLM(nn.Module):
         self.blocks = nn.ModuleList(FLLMBlock(config) for _ in range(config.num_layers))
         self.final_norm = RMSNorm(config.hidden_size)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.apply(self._init_weights)
+        if config.tie_embeddings:
+            self.lm_head.weight = self.token_embedding.weight
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch, seq_len = input_ids.shape
@@ -110,16 +125,66 @@ class FLLMForCausalLM(nn.Module):
         return self.lm_head(self.final_norm(x))
 
     @torch.no_grad()
-    def generate(self, input_ids: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        *,
+        eos_token_id: int | None = None,
+        temperature: float = 0.0,
+        top_k: int | None = None,
+        repetition_penalty: float = 1.0,
+    ) -> torch.Tensor:
         self.eval()
         for _ in range(max_new_tokens):
             context = input_ids[:, -self.config.context_length :]
             logits = self(context)[:, -1, :]
-            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            logits = apply_repetition_penalty(logits, input_ids, repetition_penalty)
+            next_token = sample_next_token(logits, temperature=temperature, top_k=top_k)
             input_ids = torch.cat([input_ids, next_token], dim=-1)
+            if eos_token_id is not None and torch.all(next_token.squeeze(-1) == eos_token_id):
+                break
         return input_ids
 
 
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
+
+def sample_next_token(
+    logits: torch.Tensor,
+    *,
+    temperature: float = 0.0,
+    top_k: int | None = None,
+) -> torch.Tensor:
+    if temperature <= 0.0:
+        return torch.argmax(logits, dim=-1, keepdim=True)
+
+    logits = logits / temperature
+    if top_k is not None and top_k > 0 and top_k < logits.size(-1):
+        values, _ = torch.topk(logits, k=top_k, dim=-1)
+        cutoff = values[:, [-1]]
+        logits = logits.masked_fill(logits < cutoff, torch.finfo(logits.dtype).min)
+
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1)
+
+
+def apply_repetition_penalty(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    repetition_penalty: float,
+) -> torch.Tensor:
+    if repetition_penalty == 1.0:
+        return logits
+
+    adjusted = logits.clone()
+    for batch_idx in range(input_ids.size(0)):
+        seen = torch.unique(input_ids[batch_idx])
+        selected = adjusted[batch_idx, seen]
+        adjusted[batch_idx, seen] = torch.where(
+            selected < 0,
+            selected * repetition_penalty,
+            selected / repetition_penalty,
+        )
+    return adjusted

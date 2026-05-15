@@ -22,8 +22,13 @@ This is the working checklist for turning the project into a defensible paper.
 - [x] Add greedy decoding.
 - [x] Add deterministic benchmark prompts.
 - [x] Add byte tokenizer for early FPGA-friendly output vocabulary.
+- [x] Add BPE tokenizer training path for usable models.
+- [x] Add local corpus preparation and optional TinyStories download scripts.
 - [x] Add tiny training loop.
 - [x] Add decode benchmark script.
+- [ ] Train `usable-25m` on a real corpus.
+- [x] Add repetition-aware generation metrics.
+- [x] Add quality evaluator with perplexity and diversity metrics.
 
 Exit criteria:
 

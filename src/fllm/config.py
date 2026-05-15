@@ -21,7 +21,9 @@ class FLLMConfig:
     compressed_block_size: int = 16
     compressed_top_k: int = 8
     mlp_ratio: int = 4
+    dropout: float = 0.0
+    tie_embeddings: bool = True
+    initializer_range: float = 0.02
     use_moe: bool = False
     num_experts: int = 16
     active_experts: int = 2
-

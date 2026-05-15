@@ -9,6 +9,7 @@ import time
 
 import torch
 
+from fllm.checkpoint import load_training_checkpoint
 from fllm.config import FLLMConfig
 from fllm.model import FLLMForCausalLM, count_parameters
 from fllm.tokenizer import ByteTokenizer
@@ -57,8 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     device = choose_device(args.device)
-    tokenizer = ByteTokenizer()
-    model = load_model(args.checkpoint, device)
+    if args.checkpoint:
+        model, tokenizer, _ = load_training_checkpoint(args.checkpoint, device=device)
+    else:
+        tokenizer = ByteTokenizer()
+        model = load_model(args.checkpoint, device)
     model.eval()
 
     prompt_ids = torch.tensor([tokenizer.encode(args.prompt, add_bos=True)], dtype=torch.long, device=device)
@@ -99,4 +103,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -32,3 +32,11 @@ PYTHONPATH=src python3 benchmarks/benchmark_decode.py \
   --checkpoint checkpoints/tiny/model.pt \
   --new-tokens 64
 ```
+
+Quality check:
+
+```bash
+PYTHONPATH=src python3 benchmarks/evaluate_quality.py \
+  --checkpoint checkpoints/tiny/model.pt \
+  --corpus docs/sample_corpus.txt
+```
