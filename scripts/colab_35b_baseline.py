@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """
-Colab 35B Baseline — Run Qwen3.6-35B-A3B on free/Pro Colab GPU.
+Colab 35B Baseline — Run Qwen3.6-35B-A3B on Colab Pro/Pro+ GPU.
 
-This script is designed for Colab Pro/Pro+ with ≥40 GB VRAM (A100 40GB/80GB).
-It automatically selects 4-bit quantization if VRAM is tight, or keeps FP16 if
-you have an A100 80GB.
+IMPORTANT: This model is private/gated on HuggingFace.
+You MUST add your HuggingFace token to Colab secrets before running.
 
 HOW TO USE:
-  1. Open https://colab.research.google.com
-  2. Runtime → Change runtime type → GPU (A100 if available)
-  3. Upload this file or paste it into one code cell.
-  4. Set MODEL_NAME below to the exact HF model id (e.g. "Qwen/Qwen3-35B-A3B").
-  5. Run.
+  1. Get a HuggingFace token: https://huggingface.co/settings/tokens (scope: read)
+  2. In Colab, click the 🔑 Secrets icon on the left panel.
+  3. Add a secret: Name = HF_TOKEN, Value = your token.
+  4. Toggle "Notebook access" ON.
+  5. Runtime → Restart session.
+  6. Open https://colab.research.google.com
+  7. Runtime → Change runtime type → GPU (A100 if available)
+  8. Paste this script into one code cell and run.
 
 WHAT IT DOES:
   - Detects GPU VRAM and picks quantization strategy (none / 8-bit / 4-bit).
   - Downloads the model from HuggingFace (first run ~10-20 min for 35B).
   - Runs greedy decode benchmark (batch=1, 64 new tokens).
   - Logs tok/s, ms/tok, GPU memory peak.
-  - Saves to /content/fllm_colab_results/ for download.
+  - Saves JSON to /content/fllm_colab_results/ for download.
 
-If the model is not yet public, set MODEL_NAME to the correct checkpoint path.
+If you do NOT have HF access, switch to a public proxy model by setting
+MODEL_NAME to "Qwen/Qwen2.5-14B" or "Qwen/Qwen2-57B-A14B".
 """
 
 from __future__ import annotations
@@ -37,9 +40,28 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 # CONFIGURATION — change these
 # ---------------------------------------------------------------------------
-MODEL_NAME = "Qwen/Qwen3-35B-A3B"   # <-- set to real HF id when available
+MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"   # <-- real HF id (private/gated, needs token)
 GEN_LEN = 64
 PROMPT = "The future of artificial intelligence is"
+
+# ---------------------------------------------------------------------------
+# HuggingFace token (read from Colab secrets or env var)
+# ---------------------------------------------------------------------------
+HF_TOKEN = None
+try:
+    from google.colab import userdata
+    HF_TOKEN = userdata.get("HF_TOKEN")
+except Exception:
+    pass
+
+if HF_TOKEN is None:
+    HF_TOKEN = os.environ.get("HF_TOKEN")
+
+if HF_TOKEN:
+    print("HF_TOKEN loaded from secrets/environment.")
+else:
+    print("WARNING: HF_TOKEN not found. If the model is private/gated, download will fail.")
+    print("Add HF_TOKEN to Colab secrets (left panel 🔑) and restart the session.")
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -102,7 +124,9 @@ print(f"\n=== Loading {MODEL_NAME} ({strategy}) ===")
 print("NOTE: First download may take 10-20 minutes for 35B parameters.")
 
 try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
+    )
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         trust_remote_code=True,
@@ -110,6 +134,7 @@ try:
         quantization_config=quant_config,
         device_map="auto",
         low_cpu_mem_usage=True,
+        token=HF_TOKEN,
     )
     model.eval()
 except Exception as e:

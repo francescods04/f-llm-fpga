@@ -35,13 +35,22 @@ Open Colab, create a new notebook, paste the contents of `scripts/colab_quicksta
 
 ## Run Real Target Model (Qwen3.6-35B-A3B) on Colab Pro
 
-If you have **Colab Pro/Pro+ with an A100 (40 GB or 80 GB)**, you can benchmark the actual target model:
+If you have **Colab Pro/Pro+ with an A100 (40 GB or 80 GB)** and a HuggingFace token with access to the gated model, you can benchmark the actual target model:
+
+**Prerequisite:**
+1. Get a HuggingFace token: https://huggingface.co/settings/tokens (scope: read)
+2. In Colab, click 🔑 **Secrets** (left panel)
+3. Add secret: Name = `HF_TOKEN`, Value = your token
+4. Toggle **Notebook access** ON
+5. Runtime → **Restart session**
 
 **Option A — One-click notebook:**
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/francescods04/f-llm-fpga/blob/main/notebooks/colab_35b_baseline.ipynb)
 
 **Option B — One-cell script:**
-Paste the contents of `scripts/colab_35b_baseline.py` into a single code cell. It auto-detects VRAM, picks FP16/8-bit/4-bit quantization, downloads the 35 B checkpoint, runs greedy decode, and exports a JSON with tok/s and memory usage. This is the measurement used for **Gate G1**.
+Paste the contents of `scripts/colab_35b_baseline.py` into a single code cell. It reads `HF_TOKEN` from Colab secrets, auto-detects VRAM, picks FP16/8-bit/4-bit quantization, downloads the 35 B checkpoint, runs greedy decode, and exports a JSON with tok/s and memory usage. This is the measurement used for **Gate G1**.
+
+*If you do not have HF access to the gated model, switch to a public proxy (e.g. `Qwen/Qwen2.5-14B`) by editing the `MODEL_NAME` variable at the top of the script.*
 
 ## Primary Metric
 
