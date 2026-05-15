@@ -20,6 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kv-byte-factor", type=float, default=0.51,
                         help="BFP8 KV bytes / FP16 KV bytes")
     parser.add_argument("--dataflow-savings", type=float, default=0.15)
+    parser.add_argument("--weight-sparsity", type=float, default=1.0,
+                        help="N:M sparsity factor (e.g. 0.25 for 1:4, 0.50 for 2:4)")
     parser.add_argument("--json-out", default=None)
     parser.add_argument("--format", choices=["table", "json"], default="table")
     return parser
@@ -31,6 +33,7 @@ def main() -> None:
         expert_cache_hit_rate=args.expert_cache_hit,
         kv_byte_factor=args.kv_byte_factor,
         dataflow_overhead_savings=args.dataflow_savings,
+        weight_sparsity_factor=args.weight_sparsity,
     )
     results = compare(
         args.model,

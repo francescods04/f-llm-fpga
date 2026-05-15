@@ -34,6 +34,9 @@ class TileSpec:
     tile_rows: int = 16    # output rows in parallel
     num_tiles: int = 4     # replicas (one per HBM channel cluster)
     fmax_mhz: float = 600.0
+    hbm_bw_gbs: float = 460.0     # per-FPGA HBM bandwidth (VU47P HBM2)
+    hbm_efficiency: float = 0.75  # realized fraction with channel-aware layout
+    num_devices: int = 2          # shard count for 35B model
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,9 @@ class ModelShape:
     moe_inner: int = 1408
     vocab: int = 152064
     avg_ctx: int = 1024
+    weight_bits: int = 4
+    kv_bits: int = 8           # BFP8 mantissa width
+    expert_cache_hit: float = 0.60
 
 
 def matvec_cycles(out_features: int, in_features: int, tile: TileSpec) -> int:
@@ -103,6 +109,37 @@ def lm_head_cycles(shape: ModelShape, tile: TileSpec) -> int:
     return matvec_cycles(shape.vocab, shape.hidden, tile)
 
 
+def hbm_bytes_per_token(shape: ModelShape) -> float:
+    """Bytes streamed from HBM per generated token (active path only).
+
+    Three streams: active weights (after expert cache hit), KV read of the
+    current context, KV write of the new step. Shared (non-expert) weights
+    count fully; expert weights count only the cache-miss fraction.
+    """
+    # shared weights per layer: QKV proj + O proj + router (no MLP at all
+    # because MoE replaces it). Cheap relative to experts.
+    q_dim = shape.hidden * shape.hidden
+    kv_dim = shape.num_kv_heads * shape.head_dim * shape.hidden
+    shared_params = (
+        q_dim + 2 * kv_dim                  # QKV proj
+        + shape.hidden * shape.hidden       # O proj
+        + shape.hidden * shape.num_experts  # router
+    ) * shape.num_layers + shape.hidden * shape.vocab  # lm head
+    expert_params_per_token = (
+        shape.active_experts * shape.num_layers
+        * 3 * shape.moe_inner * shape.hidden  # up, gate, down
+    )
+    weight_bytes = (
+        shared_params
+        + expert_params_per_token * (1.0 - shape.expert_cache_hit)
+    ) * (shape.weight_bits / 8.0)
+
+    kv_per_layer = 2 * shape.num_kv_heads * shape.head_dim * (shape.kv_bits / 8.0)
+    kv_read = kv_per_layer * shape.num_layers * shape.avg_ctx
+    kv_write = kv_per_layer * shape.num_layers
+    return weight_bytes + kv_read + kv_write
+
+
 @dataclass(frozen=True)
 class CycleReport:
     cycles_per_token: int
@@ -111,6 +148,12 @@ class CycleReport:
     breakdown_per_block: dict[str, int]
     block_cycles: int
     lm_head: int
+    # HBM side
+    bytes_per_token: float
+    hbm_tokens_per_s: float
+    hbm_ms_per_token: float
+    # Realized = min(compute, hbm)
+    bottleneck: str
 
 
 def estimate_token(shape: ModelShape, tile: TileSpec) -> CycleReport:
@@ -118,13 +161,32 @@ def estimate_token(shape: ModelShape, tile: TileSpec) -> CycleReport:
     block_total = sum(per_block.values())
     lm = lm_head_cycles(shape, tile)
     total = block_total * shape.num_layers + lm
-    ms = total / (tile.fmax_mhz * 1e3)
-    tps = 1000.0 / ms if ms > 0 else 0.0
+    compute_ms = total / (tile.fmax_mhz * 1e3)
+    compute_tps = 1000.0 / compute_ms if compute_ms > 0 else 0.0
+
+    bpt = hbm_bytes_per_token(shape)
+    bw = tile.hbm_bw_gbs * tile.hbm_efficiency * 1e9 * tile.num_devices
+    hbm_tps = bw / bpt if bpt > 0 else 0.0
+    hbm_ms = 1000.0 / hbm_tps if hbm_tps > 0 else float("inf")
+
+    if compute_tps < hbm_tps:
+        bottleneck = "compute"
+        realized_tps = compute_tps
+        realized_ms = compute_ms
+    else:
+        bottleneck = "hbm"
+        realized_tps = hbm_tps
+        realized_ms = hbm_ms
+
     return CycleReport(
         cycles_per_token=total,
-        ms_per_token=ms,
-        tokens_per_s=tps,
+        ms_per_token=realized_ms,
+        tokens_per_s=realized_tps,
         breakdown_per_block=per_block,
         block_cycles=block_total,
         lm_head=lm,
+        bytes_per_token=bpt,
+        hbm_tokens_per_s=hbm_tps,
+        hbm_ms_per_token=hbm_ms,
+        bottleneck=bottleneck,
     )

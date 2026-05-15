@@ -84,6 +84,7 @@ class FPGAOptimizations:
     dataflow_overhead_savings: float = 0.15  # fraction of HBM round-trips removed
     host_loop_us_per_token: float = 0.0   # FPGA hardware token loop = 0us host overhead
     hbm_efficiency: float = 0.75          # channel-aware layout vs ~0.55 on GPU
+    weight_sparsity_factor: float = 1.0   # N:M sparsity bytes-read factor (1.0 = dense)
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,7 @@ def estimate(
     kv_b = model.kv_bytes_per_token * avg_seq_len
 
     if is_fpga and fpga_opts is not None:
-        weight_b = weight_b * (1.0 - fpga_opts.expert_cache_hit_rate)
+        weight_b = weight_b * (1.0 - fpga_opts.expert_cache_hit_rate) * fpga_opts.weight_sparsity_factor
         kv_b = kv_b * fpga_opts.kv_byte_factor
         bytes_per_tok = (weight_b + kv_b) * (1.0 - fpga_opts.dataflow_overhead_savings)
         eff = max(efficiency, fpga_opts.hbm_efficiency)

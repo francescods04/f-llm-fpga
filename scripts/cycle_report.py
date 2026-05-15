@@ -39,8 +39,14 @@ def main() -> None:
     print(f"  block * 48 = {r.block_cycles * shape.num_layers:,}")
     print(f"  lm_head    = {r.lm_head:,}")
     print(f"  cycles/tok = {r.cycles_per_token:,}")
-    print(f"  ms/tok     = {r.ms_per_token:.3f}")
-    print(f"  tok/s      = {r.tokens_per_s:.1f}")
+    compute_ms = r.cycles_per_token / (tile.fmax_mhz * 1e3)
+    compute_tps = 1000.0 / compute_ms if compute_ms > 0 else 0.0
+    print(f"  compute ceiling: {compute_ms:.3f} ms/tok ({compute_tps:.1f} tok/s)")
+    print(f"  hbm     ceiling: {r.hbm_ms_per_token:.3f} ms/tok ({r.hbm_tokens_per_s:.1f} tok/s)")
+    print(f"  hbm bytes/tok  : {r.bytes_per_token/1e6:.1f} MB")
+    print()
+    print(f"BOTTLENECK = {r.bottleneck.upper()}")
+    print(f"  realized: {r.ms_per_token:.3f} ms/tok ({r.tokens_per_s:.1f} tok/s)")
 
 
 if __name__ == "__main__":

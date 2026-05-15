@@ -190,20 +190,48 @@ def run_token_loop(
 
     # Speculative decode overlay (stretch)
     if cfg.speculative_draft_tokens > 0:
-        reports = _overlay_speculative(reports, cfg)
+        reports = _overlay_speculative(reports, shape, tile, cfg)
 
     return reports
 
 
 def _overlay_speculative(
     reports: list[StepReport],
+    shape: ModelShape,
+    tile: TileSpec,
     cfg: TokenLoopConfig,
 ) -> list[StepReport]:
-    """Reduce effective decode cycles assuming draft model verifies k tokens."""
-    # For every accepted speculative chunk, the target model runs one
-    # verification step (larger matmul) instead of k serial decode steps.
-    # Simplified: effective steps = decode_steps * (1 - accept_rate * (k-1)/k)
-    factor = 1.0 - cfg.speculative_accept_rate * (cfg.speculative_draft_tokens - 1) / cfg.speculative_draft_tokens
+    """Reduce effective decode cycles assuming draft model verifies k tokens.
+
+    Model:
+      - Draft cost: K autoregressive steps on a tiny 1-layer model.
+      - Target cost: 1 verification forward pass (slightly more work than 1 decode
+        step because it sees K+1 tokens in parallel, but for cycle estimation
+        we treat it as 1 decode step plus a small attention overhead).
+      - Acceptance: on average we accept accept_rate * K tokens per chunk.
+      - Net effect: effective serial steps = 1 / (1 + accept_rate * (K-1))
+    """
+    # Draft is ~1/num_layers of the target, but same hidden/head dims.
+    # Rough estimate: draft body is ~15% of target body params.
+    draft_body_ratio = 0.15
+    draft_cycles_per_step = int(reports[1].cycles * draft_body_ratio) if len(reports) > 1 else 0
+    draft_total = draft_cycles_per_step * cfg.speculative_draft_tokens
+
+    # Target verification: one decode step + small attention penalty for longer ctx
+    # We approximate by using the existing decode step cycles.
+    target_verify = reports[1].cycles if len(reports) > 1 else 0
+
+    # Amortized target cycles per accepted token
+    accepted_per_chunk = cfg.speculative_accept_rate * cfg.speculative_draft_tokens
+    if accepted_per_chunk <= 0:
+        return reports  # no speedup
+
+    # Cycles per effective token = (draft_total + target_verify) / accepted_per_chunk
+    cycles_per_eff_token = (draft_total + target_verify) / accepted_per_chunk
+
+    # Scale every decode report accordingly
+    baseline_per_token = reports[1].cycles if len(reports) > 1 else 1
+    factor = cycles_per_eff_token / baseline_per_token
     for r in reports:
         if r.step >= 0:
             r.cycles = int(r.cycles * factor)

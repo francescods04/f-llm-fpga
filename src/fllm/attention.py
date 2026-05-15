@@ -21,6 +21,24 @@ import torch.nn.functional as F
 from fllm.config import FLLMConfig
 
 
+def compressed_block_summary(kv: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Mean-pool a KV tensor along seq_len into blocks of `block_size`.
+
+    Shape: (B, H, T, D) -> (B, H, ceil(T/block_size), D).
+    The FPGA implementation maintains these summaries incrementally: each new
+    KV write updates the latest block's running mean; once full, a new block
+    slot opens. This Python form is the bulk equivalent for training/eval.
+    """
+    batch, heads, seq_len, dim = kv.shape
+    pad = (-seq_len) % block_size
+    if pad:
+        padding = torch.zeros(batch, heads, pad, dim, device=kv.device, dtype=kv.dtype)
+        kv = torch.cat([kv, padding], dim=2)
+    blocks = kv.shape[2] // block_size
+    kv = kv.reshape(batch, heads, blocks, block_size, dim)
+    return kv.mean(dim=3)
+
+
 @dataclass
 class KVCache:
     k: torch.Tensor      # (batch, num_kv_heads, max_len, head_dim)
@@ -73,6 +91,9 @@ class GQAttention(nn.Module):
         self.use_rope = config.use_rope
         self.rope_theta = config.rope_theta
         self.context_length = config.context_length
+        self.use_compressed_global = config.use_compressed_global
+        self.compressed_block_size = config.compressed_block_size
+        self.compressed_top_k = config.compressed_top_k
 
         q_dim = self.num_heads * self.head_dim
         kv_dim = self.num_kv_heads * self.head_dim
@@ -139,12 +160,65 @@ class GQAttention(nn.Module):
         q_positions = torch.arange(q_pos_start, q_pos_start + seq_len, device=x.device)
         k_positions = torch.arange(k_full.size(-2), device=x.device)
         causal = q_positions[:, None] >= k_positions[None, :]
-        local = (q_positions[:, None] - k_positions[None, :]) < self.local_window
-        mask = causal & local
-        scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
+        local_mask = (q_positions[:, None] - k_positions[None, :]) < self.local_window
+        attn_mask = causal & local_mask
+
+        if self.use_compressed_global and k_full.size(-2) > self.local_window:
+            global_mask = self._compressed_global_mask(
+                q, k_full, q_positions, k_positions, causal
+            )
+            attn_mask = attn_mask | global_mask
+
+        scores = scores.masked_fill(~attn_mask, torch.finfo(scores.dtype).min)
 
         probs = F.softmax(scores, dim=-1)
         probs = self.attn_dropout(probs)
         out = probs @ v_full
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, -1)
         return self.resid_dropout(self.o_proj(out))
+
+    def _compressed_global_mask(
+        self,
+        q: torch.Tensor,
+        k_full: torch.Tensor,
+        q_positions: torch.Tensor,
+        k_positions: torch.Tensor,
+        causal: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pick top-k compressed blocks of past context to admit into attention.
+
+        Mean-pools K along blocks of `compressed_block_size`, scores each block
+        against each query, then selects `compressed_top_k` blocks per query
+        and adds those tokens to the mask. Blocks fully inside the local
+        window are excluded (already admitted). Block selection is causal.
+        """
+        bs = self.compressed_block_size
+        block_summaries = compressed_block_summary(k_full, bs)  # (B,H,Nb,D)
+        block_scores = (q @ block_summaries.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        seq_len = q.size(-2)
+        num_blocks = block_summaries.size(-2)
+        block_positions = torch.arange(num_blocks, device=q.device) * bs
+        block_causal = q_positions[:, None] >= block_positions[None, :]
+
+        outside_local = (q_positions[:, None] - block_positions[None, :]) >= self.local_window
+        block_eligible = block_causal & outside_local
+        block_scores = block_scores.masked_fill(
+            ~block_eligible.unsqueeze(0).unsqueeze(0), torch.finfo(block_scores.dtype).min
+        )
+
+        k_eff = min(self.compressed_top_k, num_blocks)
+        _, top_blocks = torch.topk(block_scores, k=k_eff, dim=-1)  # (B,H,seq,k)
+
+        # Expand selected blocks back to token positions
+        offsets = torch.arange(bs, device=q.device)
+        selected_tokens = (top_blocks.unsqueeze(-1) * bs + offsets).reshape(
+            *top_blocks.shape[:-1], k_eff * bs
+        )
+        full_mask = torch.zeros(
+            *q.shape[:-1], k_full.size(-2), dtype=torch.bool, device=q.device,
+        )
+        valid = selected_tokens < k_full.size(-2)
+        safe_idx = selected_tokens.clamp(max=k_full.size(-2) - 1)
+        full_mask.scatter_(-1, safe_idx, valid)
+        return full_mask & causal.unsqueeze(0).unsqueeze(0)
