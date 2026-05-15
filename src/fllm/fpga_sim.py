@@ -104,9 +104,16 @@ def fpga_sim_mode(
     *,
     quant: QuantConfig = QuantConfig(),
     silu_cfg: LUTConfig = LUTConfig(num_entries=1024),
+    restore_weights: bool = True,
 ):
-    """Apply FPGA-equivalent math to model in-place; restore on exit."""
-    state_backup = copy.deepcopy(model.state_dict())
+    """Apply FPGA-equivalent math to model in-place; restore on exit.
+
+    Args:
+        restore_weights: if False, skips the deep copy of model.state_dict()
+            used to restore BF16 weights on exit.  Use False for large-model
+            inference-only smoke tests where the model is discarded afterward.
+    """
+    state_backup = copy.deepcopy(model.state_dict()) if restore_weights else None
     rmsnorm_orig = RMSNorm.forward
     mlp_orig = MLP.forward
     expert_orig = Expert.forward
@@ -129,6 +136,5 @@ def fpga_sim_mode(
         MLP.forward = mlp_orig
         Expert.forward = expert_orig
         GQAttention.forward = gqa_orig
-        # Rebuild the original linears: caller is responsible for a clean reload
-        # if they want to reuse the BF16 model for training.
-        model.load_state_dict(state_backup, strict=False)
+        if state_backup is not None:
+            model.load_state_dict(state_backup, strict=False)
