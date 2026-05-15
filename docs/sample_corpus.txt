@@ -1,0 +1,29 @@
+Full FPGA inference is a narrow but important target.
+
+A graphics processor is excellent when the workload is dense, batched, and regular.
+Autoregressive language model decoding is different. A system receives a prompt,
+computes a context state, and then generates one token at a time. Each token depends
+on the previous token. The next step cannot start until the current token is known.
+
+This project studies a different design point. Instead of forcing a conventional
+Transformer through a general-purpose runtime, the model and the hardware are shaped
+together. The language model uses a small output vocabulary in early experiments,
+low-bit weights, local attention for recent tokens, compressed global context for
+older tokens, and a deterministic token loop. The FPGA owns the decode loop.
+
+The first goal is not to build the largest model. The first goal is to build a
+complete model that can generate text, can be quantized, and can be benchmarked
+fairly against a GPU. The metric that matters is joule per token. If the same model
+uses less energy per generated token on FPGA than on GPU, the hypothesis becomes
+interesting.
+
+Every component has to earn its place. Full attention is expensive. A large language
+model head is expensive. Expert routing is useful only if the memory layout makes it
+cheap. Compression is useful only if it preserves enough information for generation.
+The hardware design must expose these tradeoffs instead of hiding them behind a
+runtime.
+
+The research question is simple: can a full FPGA language model beat a GPU in
+efficiency for batch one inference when the architecture is designed for the FPGA
+from the beginning?
+

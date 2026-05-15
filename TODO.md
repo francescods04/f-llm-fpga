@@ -14,13 +14,16 @@ This is the working checklist for turning the project into a defensible paper.
 
 ## Phase 1 - Software Reference Model
 
-- [ ] Implement a minimal decoder-only reference model in `src/fllm`.
-- [ ] Add local attention over a fixed window.
+- [x] Implement a minimal decoder-only reference model in `src/fllm`.
+- [x] Add local attention over a fixed window.
 - [ ] Add compressed global context blocks.
 - [ ] Add optional low-bit MoE block in software.
 - [ ] Add a hierarchical or streaming LM head.
-- [ ] Add greedy decoding.
-- [ ] Add deterministic benchmark prompts.
+- [x] Add greedy decoding.
+- [x] Add deterministic benchmark prompts.
+- [x] Add byte tokenizer for early FPGA-friendly output vocabulary.
+- [x] Add tiny training loop.
+- [x] Add decode benchmark script.
 
 Exit criteria:
 
@@ -95,4 +98,3 @@ Exit criteria:
 
 - Results answer whether full-FPGA beats GPU efficiency in the target regime.
 - Limitations are explicit and measured.
-

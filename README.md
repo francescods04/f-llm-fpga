@@ -57,6 +57,28 @@ scripts/      Utility scripts
 
 ## Current Status
 
-Planning and paper scaffold phase. The next milestone is a software-only reference
-model and a GPU/Mac baseline before any FPGA implementation work.
+Software reference phase. The repository includes a tiny PyTorch decoder model,
+byte tokenizer, local corpus, training script, and decode benchmark. The next
+milestone is to add compressed global context and quantization simulation.
 
+## Quickstart
+
+Run a model smoke test:
+
+```bash
+PYTHONPATH=src python3 scripts/smoke_model.py
+```
+
+Train the tiny reference model on the local sample corpus:
+
+```bash
+PYTHONPATH=src python3 scripts/train_tiny.py --steps 50
+```
+
+Benchmark decode:
+
+```bash
+PYTHONPATH=src python3 benchmarks/benchmark_decode.py \
+  --checkpoint checkpoints/tiny/model.pt \
+  --new-tokens 64
+```

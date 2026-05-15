@@ -25,3 +25,10 @@ Every benchmark should emit machine-readable JSON:
 }
 ```
 
+Current decode benchmark:
+
+```bash
+PYTHONPATH=src python3 benchmarks/benchmark_decode.py \
+  --checkpoint checkpoints/tiny/model.pt \
+  --new-tokens 64
+```

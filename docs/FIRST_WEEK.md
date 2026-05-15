@@ -24,17 +24,19 @@ Recommendation: start with 8k for speed, then move to 16k/32k.
 
 ## Day 2 - Software Model Skeleton
 
-- [ ] Implement config object.
-- [ ] Implement embedding.
-- [ ] Implement RMSNorm.
-- [ ] Implement simple causal local attention.
-- [ ] Implement MLP.
-- [ ] Implement LM head.
-- [ ] Add greedy generation test.
+- [x] Implement config object.
+- [x] Implement embedding.
+- [x] Implement RMSNorm.
+- [x] Implement simple causal local attention.
+- [x] Implement MLP.
+- [x] Implement LM head.
+- [x] Add greedy generation test.
 
 ## Day 3 - Data And Tokenizer
 
 - [ ] Pick first dataset.
+- [x] Add byte tokenizer for first experiments.
+- [x] Add local sample corpus.
 - [ ] Train or load small BPE tokenizer.
 - [ ] Create tokenized dataset cache.
 - [ ] Add overfit test on a tiny batch.
@@ -60,4 +62,3 @@ Recommendation: start with 8k for speed, then move to 16k/32k.
   - memory footprint;
   - expected FPGA bottlenecks;
   - first kernel to implement.
-
