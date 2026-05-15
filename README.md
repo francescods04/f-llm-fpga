@@ -35,7 +35,7 @@ Open Colab, create a new notebook, paste the contents of `scripts/colab_quicksta
 
 ## Run Real Target Model (Qwen3.6-35B-A3B) on Colab Pro
 
-If you have **Colab Pro/Pro+ with an A100 (40 GB or 80 GB)** and a HuggingFace token with access to the gated model, you can benchmark the actual target model.
+If you have **Colab Pro/Pro+ with an A100 (40 GB or 80 GB)** or **RTX PRO 6000** and a HuggingFace token with access to the gated model, you can benchmark the actual target model.
 
 **Prerequisite:**
 1. Get a HuggingFace token: https://huggingface.co/settings/tokens (scope: read)
@@ -44,18 +44,18 @@ If you have **Colab Pro/Pro+ with an A100 (40 GB or 80 GB)** and a HuggingFace t
 4. Toggle **Notebook access** ON
 5. Runtime → **Restart session**
 
-**Recommended — Unsloth GGUF + llama.cpp + MTP (fastest, ~220 tok/s claimed on A100):**
+**Recommended — vLLM (best MoE support):**
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/francescods04/f-llm-fpga/blob/main/notebooks/colab_35b_baseline.ipynb)
 
-This notebook auto-selects the best backend:
-1. **Unsloth GGUF + llama.cpp + MTP** (primary — builds llama.cpp with CUDA, downloads Unsloth quantized GGUF, runs greedy + MTP speculative decode)
-2. **transformers from git** (fallback — slowest at ~9 tok/s but most compatible)
-3. **vLLM** (fallback — good middle ground)
+**Known issue:** Qwen3.6-35B-A3B is a **MoE model** that **llama.cpp does NOT support** well (hangs during load). vLLM has native MoE support and is the most reliable backend.
 
-The Unsloth approach uses pre-quantized Dynamic GGUFs (e.g. `UD-Q4_K_XL` at ~23 GB, `UD-Q2_K_XL` at ~17 GB) and MTP (Multi Token Prediction) speculative decoding for 1.4-2× speedup. According to Unsloth, Qwen3.6-35B-A3B can reach **~220 tok/s** on A100 with UD-Q2_K_XL + MTP.
+This notebook offers three backends:
+1. **vLLM** (primary — best MoE support, auto-quant, ~30-80 tok/s)
+2. **transformers from git** (fallback — ~9 tok/s, slow but compatible)
+3. **llama.cpp** (experimental — likely hangs with this model)
 
 **One-cell script (manual paste):**
-Paste the contents of `scripts/colab_35b_unsloth.py` for the fastest path, or `scripts/colab_35b_baseline.py` for the original transformers path.
+Paste the contents of `scripts/colab_35b_vllm.py` for vLLM (recommended), or `scripts/colab_35b_baseline.py` for the original transformers path.
 
 *If you do not have HF access to the gated model, switch to a public proxy (e.g. `Qwen/Qwen2.5-14B`) by editing the `MODEL_NAME` variable at the top of the script.*
 
