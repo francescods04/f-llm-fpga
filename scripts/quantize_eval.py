@@ -51,6 +51,8 @@ def build_parser():
     p.add_argument("--weight-bits", type=int, default=4)
     p.add_argument("--activation-bits", type=int, default=8)
     p.add_argument("--group-size", type=int, default=-1)
+    p.add_argument("--nm-n", type=int, default=0, help="N:M sparsity N (0 = disabled)")
+    p.add_argument("--nm-m", type=int, default=4, help="N:M sparsity M")
     p.add_argument("--json-out", default=None)
     return p
 
@@ -69,10 +71,15 @@ def main():
     )
 
     qmodel = copy.deepcopy(model)
+    nm = None
+    if args.nm_n > 0 and args.nm_n < args.nm_m:
+        from fllm.sparsity import NMSparsity
+        nm = NMSparsity(n=args.nm_n, m=args.nm_m)
     qcfg = QuantConfig(
         weight_bits=args.weight_bits,
         activation_bits=args.activation_bits,
         weight_group_size=args.group_size,
+        nm_sparsity=nm,
     )
     replaced = quantize_model_(qmodel, qcfg, skip=("lm_head",))
     quant_loss = loss_on(
@@ -87,6 +94,7 @@ def main():
         "weight_bits": args.weight_bits,
         "activation_bits": args.activation_bits,
         "weight_group_size": args.group_size,
+        "nm_sparsity": f"{args.nm_n}:{args.nm_m}" if nm else "none",
         "bf16_loss": bf16_loss,
         "bf16_ppl": math.exp(min(bf16_loss, 20.0)),
         "quant_loss": quant_loss,

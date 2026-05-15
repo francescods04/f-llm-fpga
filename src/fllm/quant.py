@@ -19,12 +19,15 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from fllm.sparsity import NMSparsity, apply_nm_mask
+
 
 @dataclass(frozen=True)
 class QuantConfig:
     weight_bits: int = 4
     activation_bits: int = 8
     weight_group_size: int = -1  # -1 = per output channel only
+    nm_sparsity: NMSparsity | None = None  # optional N:M structured pruning
 
 
 def _qmax(bits: int) -> int:
@@ -88,12 +91,19 @@ class QuantLinear(nn.Module):
 
 
 def quantize_model_(model: nn.Module, qcfg: QuantConfig, *, skip: tuple[str, ...] = ()) -> int:
-    """Recursively replace nn.Linear modules in-place with QuantLinear. Returns count replaced."""
+    """Recursively replace nn.Linear modules in-place with QuantLinear.
+
+    If qcfg.nm_sparsity is set, applies structured pruning to the weight
+    before quantizing.  Returns count replaced.
+    """
     replaced = 0
     for name, child in list(model.named_children()):
         if name in skip:
             continue
         if isinstance(child, nn.Linear) and child.bias is None:
+            if qcfg.nm_sparsity is not None:
+                with torch.no_grad():
+                    child.weight.copy_(apply_nm_mask(child.weight.data, qcfg.nm_sparsity))
             setattr(model, name, QuantLinear(child, qcfg))
             replaced += 1
         else:

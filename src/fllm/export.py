@@ -86,6 +86,56 @@ def export_linear_int4(weight: torch.Tensor, path: str | Path, *, group_size: in
     return out_path
 
 
+def _pack_sparse_mask(mask: torch.Tensor) -> bytes:
+    """Pack a boolean mask (out_f, in_f) into bytes, 1 bit per nibble.
+
+    The FPGA matvec kernel expects one mask bit per INT4 weight (nibble).
+    Weights are packed 2 per byte, so the mask is ordered by nibble:
+      bit 0 -> low nibble of byte 0
+      bit 1 -> high nibble of byte 0
+      bit 2 -> low nibble of byte 1
+      ...
+    Each row is padded to a byte boundary.
+    """
+    out_f, in_f = mask.shape
+    bits_per_row = in_f
+    bytes_per_row = (bits_per_row + 7) // 8
+    packed = torch.zeros(out_f, bytes_per_row, dtype=torch.uint8)
+    for b in range(bytes_per_row):
+        for bit in range(8):
+            col = b * 8 + bit
+            if col < in_f:
+                packed[:, b] |= (mask[:, col].to(torch.uint8) << bit)
+    return packed.numpy().tobytes()
+
+
+def export_linear_int4_with_mask(
+    weight: torch.Tensor,
+    mask: torch.Tensor,
+    path: str | Path,
+    *,
+    group_size: int = -1,
+) -> Path:
+    """Export packed INT4 weights + sparsity mask in a single binary.
+
+    Layout:
+        [standard FLLM weight header + packed weights + scales]
+        [mask header: magic=b"MASK", rows=u32, cols=u32, bytes_per_row=u32]
+        [packed mask bytes]
+    """
+    weight_path = export_linear_int4(weight, path, group_size=group_size)
+    raw = weight_path.read_bytes()
+
+    if mask.dim() != 2:
+        raise ValueError("mask must be 2D")
+    out_f, in_f = mask.shape
+    mask_bytes = _pack_sparse_mask(mask)
+    mask_header = struct.pack("<4sIII", b"MASK", out_f, in_f, (in_f + 7) // 8)
+
+    weight_path.write_bytes(raw + mask_header + mask_bytes)
+    return weight_path
+
+
 def load_linear_int4(path: str | Path) -> dict:
     raw = Path(path).read_bytes()
     header = raw[:32]
