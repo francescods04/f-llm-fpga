@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Training artifacts
+checkpoints/
+datasets/
+runs/
+wandb/
+*.safetensors
+*.pt
+*.pth
+
+# FPGA/build artifacts
+*.jou
+*.log
+*.xclbin
+*.xo
+*.bit
+*.ltx
+_x/
+build/
+vitis_hls.log
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+

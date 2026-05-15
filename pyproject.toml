@@ -1,0 +1,16 @@
+[project]
+name = "f-llm-fpga"
+version = "0.1.0"
+description = "Full-FPGA inference research project for FPGA-native language models."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+research = [
+  "numpy>=1.26",
+  "torch>=2.2",
+  "tokenizers>=0.15",
+]
+
+[tool.ruff]
+line-length = 100
