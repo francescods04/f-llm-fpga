@@ -40,7 +40,8 @@ class VocabCacheLMHead(nn.Module):
 
     def __init__(self, base_head: nn.Linear, cache_token_ids: torch.Tensor) -> None:
         super().__init__()
-        if base_head.bias is not None:
+        bias = getattr(base_head, 'bias', None)
+        if bias is not None:
             raise ValueError("bias not supported in FPGA target")
         self.hidden_size = base_head.in_features
         self.vocab_size = base_head.out_features
