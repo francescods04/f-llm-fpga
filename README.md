@@ -4,24 +4,26 @@ Full-FPGA inference research project for FPGA-native language models.
 
 ## Thesis
 
-Autoregressive LLM decode at batch size 1 is often constrained by memory movement,
-small sequential kernels, and low utilization on general-purpose GPUs. This project
-investigates whether a model co-designed for FPGA execution can beat a GPU baseline
-in energy efficiency for inference-only text generation.
+Autoregressive LLM decode at batch size 1 is constrained by memory movement,
+low utilization on general-purpose GPUs, and the overhead of launching thousands
+of small kernels per token. This project investigates whether a model co-designed
+for FPGA execution can beat a GPU baseline in energy efficiency (`joule/token`)
+for inference-only text generation.
 
-The target is not to port an existing dense Transformer unchanged. The target is to
-design a small but functional FPGA-native LLM with:
+The approach is not to port an existing dense Transformer unchanged, but to
+co-design hardware and software:
 
-- low-bit weights and activations;
-- compressed local/global attention;
-- optional low-bit MoE experts;
-- hardware-owned token loop;
-- on-FPGA sampling;
-- reproducible GPU and FPGA efficiency benchmarks.
+- **Low-bit weights**: INT4 for MoE experts, INT2 (ternary) for dense paths
+- **Structured sparsity**: 2:4 pruning with skip-mask in the matvec engine
+- **Compressed attention**: GQA + RoPE + local window, KV cache in BFP8
+- **On-chip residency**: vocab cache (top-K tokens in URAM), tiny draft model
+  for speculative decode
+- **Spatial dataflow**: one Transformer block = one DATAFLOW kernel with
+  streaming FIFOs between stages
+- **Hardware-owned token loop**: the FPGA autonomously runs decode without
+  host intervention
 
 ## Primary Metric
-
-The main metric is:
 
 ```text
 joule/token
@@ -37,95 +39,140 @@ model perplexity
 FPGA resource utilization
 ```
 
-## Initial Target
+## Target Model
 
-The first publishable target is a functional model in the 50M-350M parameter range.
-The stretch target is a 1B parameter class model, assuming the FPGA memory and
-tooling constraints prove workable.
+[Qwen3-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) on AWS F2
+(2× AMD VU47P).  See [docs/QWEN3_A3B_FPGA_MAPPING.md](docs/QWEN3_A3B_FPGA_MAPPING.md).
+
+Hardware specs:
+- 2× VU47P, 460 GB/s HBM per device
+- ~40 MB URAM per SLR, 9 MB BRAM
+- 600 MHz target fmax
 
 ## Repository Layout
 
 ```text
-paper/        Paper draft, outline, figures, references
-docs/         Architecture, benchmark plan, research plan
-src/fllm/     Python reference implementation
-fpga/         HLS/RTL implementation notes and kernels
-benchmarks/   Reproducible benchmark harnesses
-experiments/  Training, quantization, and ablation notes
-scripts/      Utility scripts
+fpga/           HLS kernels (host-compilable with g++ via hls_stubs.hpp)
+  matvec_int4.hpp      INT4×INT8 matvec tile (dense + 2:4 sparse)
+  matvec_int2.hpp      INT2×INT8 ternary matvec tile
+  rmsnorm_engine.hpp   Streaming RMSNorm with rsqrt LUT
+  silu_lut.hpp         Piecewise-linear SiLU via BRAM LUT
+  softmax_engine.hpp   Shifted softmax with exp LUT
+  rope_engine.hpp      Rotary Position Embedding (decode)
+  sampler_engine.hpp   Greedy + categorical PRNG sampler
+  block_pipeline_dense.hpp  Full 10-stage dense block DATAFLOW
+  *_tb.cpp             Host testbenches (no Vitis HLS required)
+src/fllm/       Python reference implementation
+  model.py             Transformer + generate loop
+  quant.py             Fake-quant INT4 / INT2 / per-channel scales
+  sparsity.py          N:M structured pruning
+  vocab_cache.py       Two-path LM head (URAM cache + HBM fallback)
+  speculative.py       Draft model + speculative decode
+  export.py            Packed INT4 binary exporter (FLLM v1 format)
+scripts/        Research & utility scripts
+  token_loop_sim.py    Cycle-accurate decode simulator
+  cost_report.py       FPGA-vs-GPU roofline comparison
+  prepare_qwen_weights.py   HF download → INT4 → FLLM export
+  prepare_dummy_weights.py  Random Qwen-shaped → FLLM export
+  cycle_report.py      Per-kernel cycle budget
+tests/          Smoke & integration tests
 ```
 
-## Current Status
+## FPGA Kernel Status
 
-Software reference phase. The repository includes a tiny PyTorch decoder model
-(with optional top-k MoE), byte/BPE tokenizer, local corpus, training script,
-decode benchmark, INT4/INT8 fake-quant, packed INT4 weight exporter, and a
-roofline FPGA-vs-GPU cost model. The next milestone is compressed global
-context and HLS kernels.
+All kernels compile with standard `g++` (no Xilinx tools installed) using
+`fpga/hls_stubs.hpp`, which provides `ap_uint<N>`, `ap_int<N>`, and `hls::stream`
+up to 65536 bits.
 
-End target: run [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
-on AWS F2 (2x VU47P) and beat g6/g6e on `$/1M tokens` and `joule/token`. See
-[docs/QWEN3_A3B_FPGA_MAPPING.md](docs/QWEN3_A3B_FPGA_MAPPING.md).
+| Kernel | Testbench | Max Error vs Python |
+|--------|-----------|---------------------|
+| `matvec_int4` | `matvec_int4_kernel_tb.cpp` | **0** (dense + sparse) |
+| `matvec_int2` | `matvec_int2_tb.cpp` | **0** (ternary) |
+| `rmsnorm_engine` | `rmsnorm_engine_tb.cpp` | 1e-6 |
+| `silu_lut` | `silu_lut_tb.cpp` | 1.5e-5 |
+| `softmax_engine` | `softmax_engine_tb.cpp` | < 1e-2 |
+| `rope_engine` | `rope_engine_tb.cpp` | **0** |
+| `sampler_engine` | `sampler_engine_tb.cpp` | exact (deterministic) |
+| `block_pipeline_dense` | `block_pipeline_dense_tb.cpp` | structural (zero-weight sanity) |
 
-Print the current FPGA-vs-GPU projection:
+## Quickstart
+
+### Run all host kernel tests
+
+```bash
+g++ -std=c++17 -I. -I./fpga -DFLLM_LANES=32 -DFLLM_TILE_ROWS=16 \
+    -o /tmp/matvec_int4_tb fpga/matvec_int4_kernel_tb.cpp && /tmp/matvec_int4_tb
+g++ -std=c++17 -I. -I./fpga -DFLLM_LANES=32 -DFLLM_TILE_ROWS=16 \
+    -o /tmp/matvec_int2_tb fpga/matvec_int2_tb.cpp && /tmp/matvec_int2_tb
+g++ -std=c++17 -I. -I./fpga -o /tmp/rmsnorm_tb fpga/rmsnorm_engine_tb.cpp && /tmp/rmsnorm_tb
+g++ -std=c++17 -I. -I./fpga -o /tmp/silu_tb fpga/silu_lut_tb.cpp && /tmp/silu_tb
+g++ -std=c++17 -I. -I./fpga -o /tmp/softmax_tb fpga/softmax_engine_tb.cpp && /tmp/softmax_tb
+g++ -std=c++17 -I. -I./fpga -o /tmp/rope_tb fpga/rope_engine_tb.cpp && /tmp/rope_tb
+g++ -std=c++17 -I. -I./fpga -o /tmp/sampler_tb fpga/sampler_engine_tb.cpp && /tmp/sampler_tb
+g++ -std=c++17 -I. -I./fpga -DFLLM_LANES=32 -DFLLM_TILE_ROWS=16 \
+    -o fpga/block_pipeline_dense_tb fpga/block_pipeline_dense_tb.cpp && ./fpga/block_pipeline_dense_tb
+```
+
+### Run Python smoke tests
+
+```bash
+PYTHONPATH=src python3 tests/test_qwen_fpga_sim.py
+PYTHONPATH=src python3 tests/test_ternary_linear.py
+PYTHONPATH=src python3 tests/test_speculative.py
+PYTHONPATH=src python3 tests/test_end_to_end.py
+```
+
+### FPGA-vs-GPU cost projection
 
 ```bash
 PYTHONPATH=src python3 scripts/cost_report.py
 ```
 
-Inspect the Qwen3-A3B target shape and instantiate the matching FLLM config:
+### Token loop simulator (with speculative decode)
 
 ```bash
-PYTHONPATH=src python3 scripts/inspect_hf_config.py \
-  --emit-template datasets/qwen3-a3b/config.json
-PYTHONPATH=src python3 scripts/inspect_hf_config.py \
-  --config datasets/qwen3-a3b/config.json
+PYTHONPATH=src python3 scripts/token_loop_sim.py \
+    --decode-steps 128 --spec-draft 4 --spec-accept 0.70
 ```
 
-Per-kernel cycle budget at chosen FPGA tile parallelism:
+### Export dummy Qwen-shaped weights to FLLM v1
 
 ```bash
-PYTHONPATH=src python3 scripts/cycle_report.py --num-tiles 16 --tile-rows 32
+PYTHONPATH=src python3 scripts/prepare_dummy_weights.py --out-dir checkpoints/dummy-fpga
+# → 121 MB, manifest.json, round-trip MSE < 0.02
 ```
 
-End-to-end FPGA-equivalent forward (INT4 weights + INT8 acts + BFP8 KV +
-LUT softmax/SiLU/rsqrt) on a trained checkpoint:
+### Export real HuggingFace weights (requires `transformers`, ~22 GB disk for 35B INT4)
 
 ```bash
-PYTHONPATH=src python3 scripts/fpga_sim_eval.py \
-  --checkpoint checkpoints/bpe-smoke/model.pt
+PYTHONPATH=src python3 scripts/prepare_qwen_weights.py \
+    --model-id Qwen/Qwen3.6-35B-A3B \
+    --out-dir checkpoints/qwen3-fpga \
+    --nm-n 2 --nm-m 4
 ```
 
-## Quickstart
-
-Run a model smoke test:
+For smaller variants (0.5B–7B) to test the pipeline on a laptop:
 
 ```bash
-PYTHONPATH=src python3 scripts/smoke_model.py
+PYTHONPATH=src python3 scripts/prepare_qwen_weights.py \
+    --model-id Qwen/Qwen2.5-0.5B-Instruct \
+    --out-dir checkpoints/qwen05b-fpga
 ```
 
-Train the tiny reference model on the local sample corpus:
+## Current Status
 
-```bash
-PYTHONPATH=src python3 scripts/train_tiny.py --steps 50
-```
+- ✅ **Python reference**: Transformer with GQA, RoPE, MoE, RMSNorm, SwiGLU,
+  INT4/INT2 fake-quant, 2:4 sparsity, vocab cache, speculative decode.
+- ✅ **FPGA kernels**: matvec (INT4 + INT2), RMSNorm, SiLU, softmax, RoPE,
+  sampler, and a full 10-stage dense block pipeline.
+- ✅ **Cost model**: HBM-bound decode identified; speculative decode + INT2
+  dense-path URAM residency are the primary speed-up levers.
+- ✅ **Export format**: FLLM v1 binary with packed INT4 weights, per-channel
+  scales, deterministic layout, manifest JSON.
+- 🔄 **Next**: C++ loader for FLLM binaries → FPGA kernel integration test,
+  then SystemC token-loop controller simulation.
 
-Benchmark decode:
+## End Goal
 
-```bash
-PYTHONPATH=src python3 benchmarks/benchmark_decode.py \
-  --checkpoint checkpoints/tiny/model.pt \
-  --new-tokens 64
-```
-
-For the first minimally useful model, use the BPE/TinyStories path in
-[docs/TRAINING.md](docs/TRAINING.md).
-
-Generate from a checkpoint:
-
-```bash
-PYTHONPATH=src python3 scripts/generate.py \
-  --checkpoint checkpoints/tiny/model.pt \
-  --prompt "Once upon a time" \
-  --new-tokens 120
-```
+Run Qwen3-35B-A3B decode on AWS F2 at >300 tok/s with lower `joule/token`
+than a g6/g6e GPU instance.
