@@ -10,6 +10,8 @@ HOW TO USE:
   2. Colab: add HF_TOKEN to secrets (🔑), toggle Notebook access ON
   3. Runtime → Restart session
   4. Paste this into ONE code cell and run.
+  
+IMPORTANT: If you see 'XPU_KERNEL_FORMAT' error, do Runtime → Restart session.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import sys
 
 RESULTS_DIR = "/content/fllm_colab_results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -41,15 +44,38 @@ if not HF_TOKEN:
 # ---------------------------------------------------------------------------
 # Install vLLM (let it install its own compatible torch)
 # ---------------------------------------------------------------------------
-print("=== Installing vLLM ===")
-# Remove existing torch to avoid version conflicts (vLLM needs CUDA 12 torch)
-print("Removing potentially conflicting torch installation...")
-os.system("pip uninstall -y torch torchvision torchaudio 2>/dev/null")
-# Install vLLM — this will pull the correct torch version
-rc = os.system("pip install -q vllm")
-if rc != 0:
-    raise RuntimeError("vLLM install failed")
+INSTALL_MARKER = "/content/.vllm_installed"
 
+if not os.path.exists(INSTALL_MARKER):
+    print("=== Installing vLLM ===")
+    # Remove existing torch to avoid version conflicts (vLLM needs CUDA 12 torch)
+    print("Removing potentially conflicting torch installation...")
+    os.system("pip uninstall -y torch torchvision torchaudio 2>/dev/null")
+    # Install vLLM — this will pull the correct torch version
+    rc = os.system("pip install -q vllm")
+    if rc != 0:
+        raise RuntimeError("vLLM install failed")
+
+    # Save marker and ask for restart
+    with open(INSTALL_MARKER, "w") as f:
+        f.write("done")
+    
+    print("\n" + "="*60)
+    print("vLLM INSTALLED SUCCESSFULLY")
+    print("="*60)
+    print("\nIMPORTANT: You MUST restart the Python kernel now.")
+    print("Colab: Runtime → Restart session")
+    print("Then re-run this same cell.")
+    print("="*60 + "\n")
+    
+    # Exit so user must restart
+    sys.exit(0)
+else:
+    print("vLLM already installed (marker found). Proceeding with benchmark...")
+
+# ---------------------------------------------------------------------------
+# Main execution (runs after restart)
+# ---------------------------------------------------------------------------
 from vllm import LLM, SamplingParams
 import torch
 
