@@ -28,6 +28,7 @@ class QuantConfig:
     activation_bits: int = 8
     weight_group_size: int = -1  # -1 = per output channel only
     nm_sparsity: NMSparsity | None = None  # optional N:M structured pruning
+    use_int2: bool = False  # ternary {-1, 0, +1} weights (2-bit packed)
 
 
 def _qmax(bits: int) -> int:
@@ -65,6 +66,23 @@ def fake_quant_weight(weight: torch.Tensor, bits: int, group_size: int = -1) -> 
     return (q * scale).reshape(out_features, in_features)
 
 
+def fake_quant_ternary_weight(weight: torch.Tensor, group_size: int = -1) -> torch.Tensor:
+    """Fake-quant to ternary {-1, 0, +1} with per-channel or per-group scale."""
+    if group_size <= 0 or group_size >= weight.size(-1):
+        scale = weight.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
+        q = ste_round(weight / scale).clamp(-1, 1)
+        return q * scale
+
+    out_features, in_features = weight.shape
+    if in_features % group_size != 0:
+        raise ValueError("group_size must divide in_features")
+    groups = in_features // group_size
+    w = weight.reshape(out_features, groups, group_size)
+    scale = w.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
+    q = ste_round(w / scale).clamp(-1, 1)
+    return (q * scale).reshape(out_features, in_features)
+
+
 def fake_quant_activation(x: torch.Tensor, bits: int) -> torch.Tensor:
     qmax = _qmax(bits)
     scale = x.detach().abs().amax().clamp_min(1e-8) / qmax
@@ -90,11 +108,30 @@ class QuantLinear(nn.Module):
         return torch.nn.functional.linear(xq, wq)
 
 
+class TernaryLinear(nn.Module):
+    """Drop-in fake-quant replacement using ternary {-1, 0, +1} weights (2-bit)."""
+
+    def __init__(self, base: nn.Linear, qcfg: QuantConfig) -> None:
+        super().__init__()
+        if base.bias is not None:
+            raise ValueError("FPGA target uses bias-free Linear; rebuild without bias")
+        self.in_features = base.in_features
+        self.out_features = base.out_features
+        self.qcfg = qcfg
+        self.weight = nn.Parameter(base.weight.detach().clone())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        xq = fake_quant_activation(x, self.qcfg.activation_bits)
+        wq = fake_quant_ternary_weight(self.weight, self.qcfg.weight_group_size)
+        return torch.nn.functional.linear(xq, wq)
+
+
 def quantize_model_(model: nn.Module, qcfg: QuantConfig, *, skip: tuple[str, ...] = ()) -> int:
-    """Recursively replace nn.Linear modules in-place with QuantLinear.
+    """Recursively replace nn.Linear modules in-place with QuantLinear or TernaryLinear.
 
     If qcfg.nm_sparsity is set, applies structured pruning to the weight
-    before quantizing.  Returns count replaced.
+    before quantizing.  If qcfg.use_int2 is True, uses TernaryLinear.
+    Returns count replaced.
     """
     replaced = 0
     for name, child in list(model.named_children()):
@@ -104,7 +141,8 @@ def quantize_model_(model: nn.Module, qcfg: QuantConfig, *, skip: tuple[str, ...
             if qcfg.nm_sparsity is not None:
                 with torch.no_grad():
                     child.weight.copy_(apply_nm_mask(child.weight.data, qcfg.nm_sparsity))
-            setattr(model, name, QuantLinear(child, qcfg))
+            linear_cls = TernaryLinear if qcfg.use_int2 else QuantLinear
+            setattr(model, name, linear_cls(child, qcfg))
             replaced += 1
         else:
             replaced += quantize_model_(child, qcfg, skip=skip)
