@@ -77,7 +77,9 @@ def run(cmd: str) -> None:
 # ---------------------------------------------------------------------------
 print("=== Installing dependencies ===")
 run("pip install -q torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
-run("pip install -q transformers accelerate bitsandbytes")
+# transformers stable may not yet support qwen3_5_moe; install from source
+run("pip install -q git+https://github.com/huggingface/transformers.git")
+run("pip install -q accelerate bitsandbytes")
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
