@@ -122,27 +122,19 @@ else:
     print(f"Using cached: {LOCAL_GGUF}")
 
 # ---------------------------------------------------------------------------
-# 5. Write prompt to file (avoids shell escaping issues)
-# ---------------------------------------------------------------------------
-PROMPT_FILE = "/content/prompt.txt"
-with open(PROMPT_FILE, "w") as f:
-    f.write(PROMPT)
-
-# ---------------------------------------------------------------------------
-# 6. Benchmark: standard greedy decode (with output capture)
+# 5. Benchmark: standard greedy decode (with output capture)
 # ---------------------------------------------------------------------------
 print("\n=== Standard greedy decode (validated) ===")
 
 cmd = [
     LLAMA_CLI,
-    "--model", LOCAL_GGUF,
-    "--file", PROMPT_FILE,
-    "--n-predict", str(GEN_LEN),
+    "-m", LOCAL_GGUF,
+    "-p", PROMPT,
+    "-n", str(GEN_LEN),
     "--temp", "0.0",
     "--top-p", "1.0",
     "--top-k", "1",
-    "--batch-size", "1",
-    "--ngl", "999",
+    "-ngl", "999",
 ]
 
 print(f"Running: {' '.join(cmd)}")
@@ -200,6 +192,8 @@ cmd_mtp = cmd + [
     "--spec-type", "draft-mtp",
     "--spec-draft-n-max", "2",
 ]
+# Note: llama.cpp may use different flag names; if the above fails,
+# try removing the MTP flags and running standard mode only.
 
 print(f"Running: {' '.join(cmd_mtp)}")
 t0 = time.time()
