@@ -57,9 +57,21 @@ scripts/      Utility scripts
 
 ## Current Status
 
-Software reference phase. The repository includes a tiny PyTorch decoder model,
-byte tokenizer, local corpus, training script, and decode benchmark. The next
-milestone is to add compressed global context and quantization simulation.
+Software reference phase. The repository includes a tiny PyTorch decoder model
+(with optional top-k MoE), byte/BPE tokenizer, local corpus, training script,
+decode benchmark, INT4/INT8 fake-quant, packed INT4 weight exporter, and a
+roofline FPGA-vs-GPU cost model. The next milestone is compressed global
+context and HLS kernels.
+
+End target: run [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
+on AWS F2 (2x VU47P) and beat g6/g6e on `$/1M tokens` and `joule/token`. See
+[docs/QWEN3_A3B_FPGA_MAPPING.md](docs/QWEN3_A3B_FPGA_MAPPING.md).
+
+Print the current FPGA-vs-GPU projection:
+
+```bash
+PYTHONPATH=src python3 scripts/cost_report.py
+```
 
 ## Quickstart
 

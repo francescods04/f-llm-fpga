@@ -17,7 +17,7 @@ This is the working checklist for turning the project into a defensible paper.
 - [x] Implement a minimal decoder-only reference model in `src/fllm`.
 - [x] Add local attention over a fixed window.
 - [ ] Add compressed global context blocks.
-- [ ] Add optional low-bit MoE block in software.
+- [x] Add optional low-bit MoE block in software.
 - [ ] Add a hierarchical or streaming LM head.
 - [x] Add greedy decoding.
 - [x] Add deterministic benchmark prompts.
@@ -38,12 +38,12 @@ Exit criteria:
 
 ## Phase 2 - Quantization And FPGA-Native Constraints
 
-- [ ] Add simulated INT8 activation quantization.
-- [ ] Add INT4 weight quantization.
+- [x] Add simulated INT8 activation quantization.
+- [x] Add INT4 weight quantization.
 - [ ] Test INT2 or ternary weights for selected blocks.
 - [ ] Replace hardware-hostile ops with approximations where needed.
-- [ ] Measure perplexity and generation degradation per quantization mode.
-- [ ] Export weights in FPGA-friendly packed format.
+- [x] Measure perplexity and generation degradation per quantization mode (scripts/quantize_eval.py).
+- [x] Export weights in FPGA-friendly packed format (src/fllm/export.py).
 
 Exit criteria:
 

@@ -13,6 +13,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from fllm.config import FLLMConfig
+from fllm.moe import MoEMLP
 
 
 class RMSNorm(nn.Module):
@@ -84,7 +85,7 @@ class FLLMBlock(nn.Module):
         self.attn_norm = RMSNorm(config.hidden_size)
         self.attn = LocalCausalSelfAttention(config)
         self.mlp_norm = RMSNorm(config.hidden_size)
-        self.mlp = MLP(config)
+        self.mlp = MoEMLP(config) if config.use_moe else MLP(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.attn_norm(x))

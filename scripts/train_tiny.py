@@ -94,6 +94,9 @@ def main() -> None:
     num_heads = preset.num_heads if preset else args.num_heads
     local_window = preset.local_window if preset else args.local_window
     mlp_ratio = preset.mlp_ratio if preset else args.mlp_ratio
+    use_moe = preset.use_moe if preset else False
+    num_experts = preset.num_experts if preset else 1
+    active_experts = preset.active_experts if preset else 1
 
     config = FLLMConfig(
         vocab_size=tokenizer.vocab_size,
@@ -105,6 +108,9 @@ def main() -> None:
         mlp_ratio=mlp_ratio,
         dropout=args.dropout,
         tie_embeddings=not args.no_tie_embeddings,
+        use_moe=use_moe,
+        num_experts=num_experts,
+        active_experts=active_experts,
     )
     model = FLLMForCausalLM(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
