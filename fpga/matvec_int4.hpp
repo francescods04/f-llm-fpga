@@ -106,6 +106,14 @@ void matvec_int4_tile(
     static_assert(IN_FEATURES % LANES == 0,
                   "IN_FEATURES must be a multiple of LANES");
 
+    // Buffer the activation vector in URAM (one copy, reused for all rows).
+    packed_a_beat_t a_buf[BEATS_PER_ROW];
+#pragma HLS BIND_STORAGE variable=a_buf type=RAM_1P
+    for (int b = 0; b < BEATS_PER_ROW; ++b) {
+#pragma HLS PIPELINE II=1
+        a_buf[b] = hbm_a_in.read();
+    }
+
     ap_int<32> accum[TILE_ROWS];
 #pragma HLS ARRAY_PARTITION variable=accum complete dim=1
 
@@ -131,7 +139,7 @@ void matvec_int4_tile(
             for (int b = 0; b < BEATS_PER_ROW; ++b) {
 #pragma HLS PIPELINE II=1 style=flp
                 packed_w_beat_t   w_beat = hbm_w_in.read();
-                packed_a_beat_t   a_beat = hbm_a_in.read();
+                packed_a_beat_t   a_beat = a_buf[b];
                 sparse_mask_beat_t mask_beat;
                 if (USE_SPARSITY) {
                     mask_beat = hbm_mask_in.read();

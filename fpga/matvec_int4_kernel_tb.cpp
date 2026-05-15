@@ -99,24 +99,29 @@ bool test_dense_small() {
     constexpr int W_BEAT_BYTES = LANES / 2;
     const int row_bytes = (IN_F + 1) / 2;
 
+    // Activation vector (one copy, buffered inside the kernel)
+    for (int b = 0; b < BEATS_PER_ROW; ++b) {
+        packed_a_beat_t ab;
+        for (int lane = 0; lane < W_BEAT_BYTES; ++lane) {
+            int col_base = b * LANES + lane * 2;
+            uint8_t a_lo = static_cast<uint8_t>(x[col_base + 0]);
+            uint8_t a_hi = static_cast<uint8_t>(x[col_base + 1]);
+            ab.set_range(16 * lane + 7,  16 * lane + 0,  ap_uint<A_BEAT_BYTES * 8>(a_lo));
+            ab.set_range(16 * lane + 15, 16 * lane + 8,  ap_uint<A_BEAT_BYTES * 8>(a_hi));
+        }
+        s_a.write(ab);
+    }
+
+    // Weight matrix (one beat per row per activation beat)
     for (int r = 0; r < OUT_F; ++r) {
         for (int b = 0; b < BEATS_PER_ROW; ++b) {
             packed_w_beat_t wb;
-            packed_a_beat_t ab;
             for (int lane = 0; lane < W_BEAT_BYTES; ++lane) {
                 int byte_idx = r * row_bytes + b * W_BEAT_BYTES + lane;
                 uint8_t w_byte = packed[byte_idx];
                 wb.set_range(8 * lane + 7, 8 * lane, ap_uint<W_BEAT_BYTES * 8>(w_byte));
-
-                // Two activation bytes per weight byte (one per nibble)
-                int col_base = b * LANES + lane * 2;
-                uint8_t a_lo = static_cast<uint8_t>(x[col_base + 0]);
-                uint8_t a_hi = static_cast<uint8_t>(x[col_base + 1]);
-                ab.set_range(16 * lane + 7,  16 * lane + 0,  ap_uint<A_BEAT_BYTES * 8>(a_lo));
-                ab.set_range(16 * lane + 15, 16 * lane + 8,  ap_uint<A_BEAT_BYTES * 8>(a_hi));
             }
             s_w.write(wb);
-            s_a.write(ab);
         }
     }
 
@@ -172,23 +177,29 @@ bool test_dense_large() {
     constexpr int W_BEAT_BYTES = LANES / 2;
     const int row_bytes = (IN_F + 1) / 2;
 
+    // Activation vector (one copy, buffered inside the kernel)
+    for (int b = 0; b < BEATS_PER_ROW; ++b) {
+        packed_a_beat_t ab;
+        for (int lane = 0; lane < W_BEAT_BYTES; ++lane) {
+            int col_base = b * LANES + lane * 2;
+            uint8_t a_lo = static_cast<uint8_t>(x[col_base + 0]);
+            uint8_t a_hi = static_cast<uint8_t>(x[col_base + 1]);
+            ab.set_range(16 * lane + 7,  16 * lane + 0,  ap_uint<A_BEAT_BYTES * 8>(a_lo));
+            ab.set_range(16 * lane + 15, 16 * lane + 8,  ap_uint<A_BEAT_BYTES * 8>(a_hi));
+        }
+        s_a.write(ab);
+    }
+
+    // Weight matrix
     for (int r = 0; r < OUT_F; ++r) {
         for (int b = 0; b < BEATS_PER_ROW; ++b) {
             packed_w_beat_t wb;
-            packed_a_beat_t ab;
             for (int lane = 0; lane < W_BEAT_BYTES; ++lane) {
                 int byte_idx = r * row_bytes + b * W_BEAT_BYTES + lane;
                 uint8_t w_byte = packed[byte_idx];
                 wb.set_range(8 * lane + 7, 8 * lane, ap_uint<W_BEAT_BYTES * 8>(w_byte));
-
-                int col_base = b * LANES + lane * 2;
-                uint8_t a_lo = static_cast<uint8_t>(x[col_base + 0]);
-                uint8_t a_hi = static_cast<uint8_t>(x[col_base + 1]);
-                ab.set_range(16 * lane + 7,  16 * lane + 0,  ap_uint<A_BEAT_BYTES * 8>(a_lo));
-                ab.set_range(16 * lane + 15, 16 * lane + 8,  ap_uint<A_BEAT_BYTES * 8>(a_hi));
             }
             s_w.write(wb);
-            s_a.write(ab);
         }
     }
 
@@ -254,10 +265,23 @@ bool test_sparse_2of4() {
     constexpr int W_BEAT_BYTES = LANES / 2;
     const int row_bytes = (IN_F + 1) / 2;
 
+    // Activation vector (one copy, buffered inside the kernel)
+    for (int b = 0; b < BEATS_PER_ROW; ++b) {
+        packed_a_beat_t ab;
+        for (int lane = 0; lane < W_BEAT_BYTES; ++lane) {
+            int col_base = b * LANES + lane * 2;
+            uint8_t a_lo = static_cast<uint8_t>(x[col_base + 0]);
+            uint8_t a_hi = static_cast<uint8_t>(x[col_base + 1]);
+            ab.set_range(16 * lane + 7,  16 * lane + 0,  ap_uint<A_BEAT_BYTES * 8>(a_lo));
+            ab.set_range(16 * lane + 15, 16 * lane + 8,  ap_uint<A_BEAT_BYTES * 8>(a_hi));
+        }
+        s_a.write(ab);
+    }
+
+    // Weight and mask matrix (one beat per row per activation beat)
     for (int r = 0; r < OUT_F; ++r) {
         for (int b = 0; b < BEATS_PER_ROW; ++b) {
             packed_w_beat_t wb;
-            packed_a_beat_t ab;
             sparse_mask_beat_t mb;
             for (int i = 0; i < mb.LIMBS; ++i) mb.limb[i] = 0;
             for (int lane = 0; lane < W_BEAT_BYTES; ++lane) {
@@ -266,11 +290,6 @@ bool test_sparse_2of4() {
                 wb.set_range(8 * lane + 7, 8 * lane, ap_uint<W_BEAT_BYTES * 8>(w_byte));
 
                 int col_base = b * LANES + lane * 2;
-                uint8_t a_lo = static_cast<uint8_t>(x[col_base + 0]);
-                uint8_t a_hi = static_cast<uint8_t>(x[col_base + 1]);
-                ab.set_range(16 * lane + 7,  16 * lane + 0,  ap_uint<A_BEAT_BYTES * 8>(a_lo));
-                ab.set_range(16 * lane + 15, 16 * lane + 8,  ap_uint<A_BEAT_BYTES * 8>(a_hi));
-
                 int keep0 = (w_q[r * IN_F + col_base + 0] != 0) ? 1 : 0;
                 int keep1 = (w_q[r * IN_F + col_base + 1] != 0) ? 1 : 0;
                 mb.limb[0] |= (keep0 << (2 * lane + 0));
@@ -278,7 +297,6 @@ bool test_sparse_2of4() {
             }
             s_w.write(wb);
             s_mask.write(mb);
-            s_a.write(ab);
         }
     }
 

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <queue>
 #include <stdexcept>
 #include <string>
@@ -303,13 +304,17 @@ ap_int<W> ap_mul(ap_int<M> a, ap_int<N> b) {
 // ---------------------------------------------------------------------------
 namespace hls {
 
+inline int& hls_stream_next_id() { static int id = 0; return id; }
+
 template<typename T>
 class stream {
     std::queue<T> q;
     std::size_t cap;
+    std::string name;
 public:
-    stream() : cap(1024) {}
-    explicit stream(std::size_t depth) : cap(depth) {}
+    stream() : cap(1024), name("stream_" + std::to_string(hls_stream_next_id()++)) {}
+    explicit stream(std::size_t depth) : cap(depth), name("stream_" + std::to_string(hls_stream_next_id()++)) {}
+    explicit stream(std::size_t depth, const char* n) : cap(depth), name(n) {}
 
     void write(const T& v) {
         if (q.size() >= cap) {

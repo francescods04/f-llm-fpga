@@ -33,3 +33,4 @@ vitis_hls.log
 .DS_Store
 .vscode/
 .idea/
+fpga/block_pipeline_dense_tb
