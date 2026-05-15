@@ -39,9 +39,13 @@ if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN not found. Add it to Colab secrets and restart.")
 
 # ---------------------------------------------------------------------------
-# Install vLLM (pre-built wheel for CUDA 12.1 on A100)
+# Install vLLM (let it install its own compatible torch)
 # ---------------------------------------------------------------------------
 print("=== Installing vLLM ===")
+# Remove existing torch to avoid version conflicts (vLLM needs CUDA 12 torch)
+print("Removing potentially conflicting torch installation...")
+os.system("pip uninstall -y torch torchvision torchaudio 2>/dev/null")
+# Install vLLM — this will pull the correct torch version
 rc = os.system("pip install -q vllm")
 if rc != 0:
     raise RuntimeError("vLLM install failed")
