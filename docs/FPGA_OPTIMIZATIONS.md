@@ -288,6 +288,23 @@ cost and likely lower J/tok**, which is the actual research result we want.
 
 ---
 
+## 11. Operation-Folding Checklist (Talos V2 Lesson)
+
+Every FSM idle state is a wasted cycle. Before declaring a kernel done, prove
+that none of the following folds are possible:
+
+- [ ] Per-row weight scale apply folded into matvec output beat?
+- [ ] Softmax `max` tracked inside the QK^T dot pass?
+- [ ] Residual-add folded into the next block's RMSNorm read?
+- [ ] LM-head argmax folded into the head's projection output beat?
+- [ ] RoPE rotation folded with Q/K projection write?
+- [ ] KV BFP block-max tracked during V write (one fewer pass at read time)?
+- [ ] Top-k router compare-swap folded into the router logits output beat?
+- [ ] Expert dispatch mask computed during routing softmax (no extra pass)?
+
+If a fold is not possible, write *why* in the kernel header. Folding is the
+default; not folding is the exception.
+
 ## What This Means For The Software Reference
 
 Each optimization above has a **Python proxy** so the architecture can be

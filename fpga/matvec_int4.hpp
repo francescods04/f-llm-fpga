@@ -2,6 +2,17 @@
 //
 // First FPGA kernel for the F-LLM pipeline. Targets AMD/Xilinx VU47P at 600 MHz.
 //
+// Time-multiplex strategy (lesson borrowed from Talos V2):
+//   This same tile is dispatched for every matvec in the block:
+//     QKV projection (3x)  -> tile run with stacked output dims
+//     O projection         -> tile run, hidden -> hidden
+//     MoE up + gate (each) -> tile run, hidden -> inner per active expert
+//     MoE down             -> tile run, inner -> hidden per active expert
+//     LM head              -> tile run, hidden -> vocab (chunked)
+//   The matrix shape is parameterized at call site; the tile itself is one
+//   placed instance. Replicate the tile K times to match HBM channel count;
+//   each replica is fed by an independent channel/AXI port.
+//
 // Contract:
 //   - Weights are packed 2 INT4 per byte, row-major.
 //   - Activations are INT8 (per-tensor scale separate).
