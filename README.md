@@ -23,6 +23,16 @@ co-design hardware and software:
 - **Hardware-owned token loop**: the FPGA autonomously runs decode without
   host intervention
 
+## Run on Google Colab (Free GPU)
+
+You can validate the quant ablation and measure GPU baseline tok/s on a **free T4** without installing anything locally.
+
+**Option A — One-click notebook:**
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/francescods04/f-llm-fpga/blob/main/notebooks/colab_baseline.ipynb)
+
+**Option B — One-cell script (copy-paste):**
+Open Colab, create a new notebook, paste the contents of `scripts/colab_quickstart.py` into a single code cell, and run it. It installs deps, clones the repo, loads a proxy model, runs INT3/INT4/BFP4 tests, and measures tok/s automatically. Results are saved to the Files panel for download.
+
 ## Primary Metric
 
 ```text
